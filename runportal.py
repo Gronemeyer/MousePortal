@@ -33,6 +33,8 @@ from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 from panda3d.core import CardMaker, NodePath, Texture, WindowProperties
 
+from fog import FogDemo
+
 def load_config(config_file: str) -> Dict[str, Any]:
     """
     Load configuration parameters from a JSON file.
