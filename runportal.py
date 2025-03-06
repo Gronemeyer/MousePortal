@@ -249,12 +249,14 @@ class FogEffect:
         self.base = base
         self.fog = Fog("fog")
         
-        # Set fog color (default white).
+        # Set fog color.
         self.fog.setColor(*fog_color)
         
         # Set the near and far distance for the fog.
         self.fog.setExpDensity(density)  # You can adjust this to get a denser fog effect.
         self.fog.setLinearRange(near_distance, far_distance)
+        
+        base.setBackgroundColor(fog_color)
         
         # Attach the fog to the root node to affect the entire scene.
         self.base.render.setFog(self.fog)
@@ -316,7 +318,7 @@ class MousePortal(ShowBase):
         self.taskMgr.add(self.update, "updateTask")
         
      # Initialize fog effect with default settings (white fog, near 50 units, far 150 units).
-        self.fog_effect = FogEffect(self, fog_color=(0.41, 0.41, 0.41), near_distance=10, far_distance=70, density = 0.01)
+        self.fog_effect = FogEffect(self, fog_color=(0.5, 0.5, 0.5), near_distance=10, far_distance=70, density = 0.01)
         
     def set_key(self, key: str, value: bool) -> None:
         """
