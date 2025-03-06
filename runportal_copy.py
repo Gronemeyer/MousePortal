@@ -31,7 +31,7 @@ from typing import Any, Dict
 
 from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
-from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog
+from panda3d.core import CardMaker, NodePath, Texture, WindowProperties
 
 def load_config(config_file: str) -> Dict[str, Any]:
     """
@@ -231,33 +231,6 @@ class Corridor:
             floor_seg: NodePath = self.floor_segments.pop(-1)
             floor_seg.setY(new_y)
             self.floor_segments.insert(0, floor_seg)
-            
-class FogEffect:
-    """
-    Class to manage and apply fog to the scene.
-    """
-    def __init__(self, base: ShowBase, fog_color, near_distance, far_distance, density):
-        """
-        Initialize the fog effect.
-        
-        Parameters:
-            base (ShowBase): The Panda3D base instance.
-            fog_color (tuple): RGB color for the fog (default is white).
-            near_distance (float): The near distance where the fog starts.
-            far_distance (float): The far distance where the fog completely obscures the scene.
-        """
-        self.base = base
-        self.fog = Fog("fog")
-        
-        # Set fog color (default white).
-        self.fog.setColor(*fog_color)
-        
-        # Set the near and far distance for the fog.
-        self.fog.setExpDensity(density)  # You can adjust this to get a denser fog effect.
-        self.fog.setLinearRange(near_distance, far_distance)
-        
-        # Attach the fog to the root node to affect the entire scene.
-        self.base.render.setFog(self.fog)
 
 class MousePortal(ShowBase):
     """
@@ -315,8 +288,7 @@ class MousePortal(ShowBase):
         # Add the update task.
         self.taskMgr.add(self.update, "updateTask")
         
-     # Initialize fog effect with default settings (white fog, near 50 units, far 150 units).
-        self.fog_effect = FogEffect(self, fog_color=(0.41, 0.41, 0.41), near_distance=10, far_distance=70, density = 0.01)
+        
         
     def set_key(self, key: str, value: bool) -> None:
         """
