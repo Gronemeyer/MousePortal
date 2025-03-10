@@ -33,6 +33,7 @@ from dataclasses import dataclass
 
 from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
+from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog
 from panda3d.core import CardMaker, NodePath, Texture, WindowProperties
 from direct.showbase import DirectObject
 
@@ -238,6 +239,34 @@ class Corridor:
             floor_seg: NodePath = self.floor_segments.pop(-1)
             floor_seg.setY(new_y)
             self.floor_segments.insert(0, floor_seg)
+            
+class FogEffect:
+    """
+    Class to manage and apply fog to the scene.
+    """
+    def __init__(self, base: ShowBase, fog_color, near_distance, far_distance, density):
+        """
+        Initialize the fog effect.
+        
+        Parameters:
+            base (ShowBase): The Panda3D base instance.
+            fog_color (tuple): RGB color for the fog (default is white).
+            near_distance (float): The near distance where the fog starts.
+            far_distance (float): The far distance where the fog completely obscures the scene.
+        """
+        self.base = base
+        self.fog = Fog("fog")
+        base.setBackgroundColor(fog_color)
+        
+        # Set fog color.
+        self.fog.setColor(*fog_color)
+        
+        # Set the near and far distance for the fog.
+        self.fog.setExpDensity(density)  # You can adjust this to get a denser fog effect.
+        self.fog.setLinearRange(near_distance, far_distance)
+        
+        # Attach the fog to the root node to affect the entire scene.
+        self.base.render.setFog(self.fog)
 
 
 class SerialInputManager(DirectObject.DirectObject):
@@ -354,7 +383,7 @@ class MousePortal(ShowBase):
         self.accept('escape', self.userExit)
 
         # Set up treadmill input
-        self.treadmill = SerialInputManager(serial_port = 'COM3', messenger = self.messenger)   
+        self.treadmill = SerialInputManager(serial_port = 'COM6', messenger = self.messenger)   
 
         # Create corridor geometry.
         self.corridor: Corridor = Corridor(self, self.cfg)
@@ -371,6 +400,10 @@ class MousePortal(ShowBase):
 
         # Add the update task.
         self.taskMgr.add(self.update, "updateTask")
+        
+     # Initialize fog effect with default settings (white fog, near 50 units, far 150 units).
+        self.fog_effect = FogEffect(self, fog_color=(0.5, 0.5, 0.5), near_distance=10, far_distance=50, density = 0.001)
+        
         # self.taskMgr.setupTaskChain("serialInputDevice", numThreads = 1, tickClock = None,
         #                threadPriority = None, frameBudget = None,
         #                frameSync = True, timeslicePriority = None)
