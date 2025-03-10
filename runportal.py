@@ -19,7 +19,7 @@ Configuration parameters are loaded from a JSON file "conf.json".
 
 Author: Jake Gronemeyer
 Date: 2025-02-23
-Version: 0.1
+Version: 0.2
 """
 
 import json
@@ -27,11 +27,16 @@ import sys
 import csv
 import os
 import time
+import serial
 from typing import Any, Dict
+from dataclasses import dataclass
 
 from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog
+from panda3d.core import CardMaker, NodePath, Texture, WindowProperties
+from direct.showbase import DirectObject
+
 
 def load_config(config_file: str) -> Dict[str, Any]:
     """
@@ -71,20 +76,23 @@ class DataLogger:
             self.writer.writeheader()
 
     def log(self, timestamp, position, velocity):
-        """
-        Log one row of movement data.
-        
-        Args:
-            timestamp (float): The current time.
-            position (float): Player’s current position along the corridor.
-            velocity (float): Player’s velocity.
-        """
         self.writer.writerow({'timestamp': timestamp, 'position': position, 'velocity': velocity})
         self.file.flush()
 
     def close(self):
-        """Close the CSV file."""
         self.file.close()
+
+@dataclass
+class EncoderData:
+    """ Represents a single encoder reading."""
+    timestamp: int
+    distance: float
+    speed: float
+
+    def __repr__(self):
+        return (f"EncoderData(timestamp={self.timestamp}, "
+                f"distance={self.distance:.3f} mm, speed={self.speed:.3f} mm/s)")
+
 
 
 class Corridor:
@@ -260,6 +268,79 @@ class FogEffect:
         # Attach the fog to the root node to affect the entire scene.
         self.base.render.setFog(self.fog)
 
+
+class SerialInputManager(DirectObject.DirectObject):
+    """
+    Manages serial input via the pyserial interface.
+    
+    This class abstracts the serial connection and starts a thread that listens
+    for serial data.
+    """
+    def __init__(self, serial_port: str, baudrate: int = 57600, messenger: DirectObject = None) -> None:
+        self._port = serial_port
+        self._baud = baudrate
+        try:
+            self.serial = serial.Serial(self._port, self._baud, timeout=1)
+        except serial.SerialException as e:
+            print(f"{self.__class__}: I failed to open serial port {self._port}: {e}")
+            raise
+        self.accept('readSerial', self._store_data)
+        self.data = EncoderData(0, 0.0, 0.0)
+        self.messenger = messenger
+
+    def _store_data(self, data: EncoderData):
+        self.data = data
+
+    def _read_serial(self, task: Task) -> Task:
+        """Internal loop for continuously reading lines from the serial port."""
+        # Read a line from the Teensy board
+        raw_line = self.serial.readline()
+
+        # Decode and strip newline characters
+        line = raw_line.decode('utf-8', errors='replace').strip()
+        if line:
+            data = self._parse_line(line)
+            if data:
+                self.messenger.send("readSerial", [data])
+
+        return Task.cont
+
+    def _parse_line(self, line: str):
+        """
+        Parse a line of serial output.
+
+        Expected line formats:
+          - "timestamp,distance,speed"  or
+          - "distance,speed"
+
+        Args:
+            line (str): A single line from the serial port.
+
+        Returns:
+            EncoderData: An instance with parsed values, or None if parsing fails.
+        """
+        parts = line.split(',')
+        try:
+            if len(parts) == 3:
+                # Format: timestamp, distance, speed
+                timestamp = int(parts[0].strip())
+                distance = float(parts[1].strip())
+                speed = float(parts[2].strip())
+                return EncoderData(distance=distance, speed=speed, timestamp=timestamp)
+            elif len(parts) == 2:
+                # Format: distance, speed
+                distance = float(parts[0].strip())
+                speed = float(parts[1].strip())
+                return EncoderData(distance=distance, speed=speed)
+            else:
+                # Likely a header or message line (non-data)
+                return None
+        except ValueError:
+            # Non-numeric data (e.g., header info)
+            return None
+
+    
+
 class MousePortal(ShowBase):
     """
     Main application class for the infinite corridor simulation.
@@ -281,16 +362,16 @@ class MousePortal(ShowBase):
         wp: WindowProperties = WindowProperties()
         wp.setSize(self.cfg["window_width"], self.cfg["window_height"])
         self.win.requestProperties(wp)
-        
+        self.setFrameRateMeter(True)
         # Disable default mouse-based camera control for mapped input
         self.disableMouse()
         
-        # Initialize player parameters
-        self.player_position: float = 0.0
-        self.player_velocity: float = 0.0
+        # Initialize camera parameters
+        self.camera_position: float = 0.0
+        self.camera_velocity: float = 0.0
         self.speed_scaling: float = self.cfg.get("speed_scaling", 5.0)
         self.camera_height: float = self.cfg.get("camera_height", 2.0)  
-        self.camera.setPos(0, self.player_position, self.camera_height)
+        self.camera.setPos(0, self.camera_position, self.camera_height)
         self.camera.setHpr(0, 0, 0)
         
         # Set up key mapping for keyboard input
@@ -300,6 +381,10 @@ class MousePortal(ShowBase):
         self.accept("arrow_down", self.set_key, ["backward", True])
         self.accept("arrow_down-up", self.set_key, ["backward", False])
         self.accept('escape', self.userExit)
+
+        # Set up treadmill input
+        self.treadmill = SerialInputManager(serial_port = 'COM6', messenger = self.messenger)   
+
         # Create corridor geometry.
         self.corridor: Corridor = Corridor(self, self.cfg)
         self.segment_length: float = self.cfg["segment_length"]
@@ -319,6 +404,15 @@ class MousePortal(ShowBase):
      # Initialize fog effect with default settings (white fog, near 50 units, far 150 units).
         self.fog_effect = FogEffect(self, fog_color=(0.5, 0.5, 0.5), near_distance=10, far_distance=50, density = 0.001)
         
+        # self.taskMgr.setupTaskChain("serialInputDevice", numThreads = 1, tickClock = None,
+        #                threadPriority = None, frameBudget = None,
+        #                frameSync = True, timeslicePriority = None)
+        self.taskMgr.add(self.treadmill._read_serial, name = "readSerial")
+
+        self.messenger.toggleVerbose()
+
+
+
     def set_key(self, key: str, value: bool) -> None:
         """
         Update the key state for the given key.
@@ -343,27 +437,29 @@ class MousePortal(ShowBase):
         dt: float = globalClock.getDt()
         move_distance: float = 0.0
         
-        # Update player velocity based on key input
+        # Update camera velocity based on key input
         if self.key_map["forward"]:
-            self.player_velocity = self.speed_scaling
+            self.camera_velocity = self.speed_scaling
         elif self.key_map["backward"]:
-            self.player_velocity = -self.speed_scaling
+            self.camera_velocity = -self.speed_scaling
         else:
-            self.player_velocity = 0.0
+            self.camera_velocity = 0.0
         
-        # Update player position (movement along the Y axis)
-        self.player_position += self.player_velocity * dt
-        move_distance = self.player_velocity * dt
-        self.camera.setPos(0, self.player_position, self.camera_height)
+        self.camera_velocity = self.treadmill.data.speed
+
+        # Update camera position (movement along the Y axis)
+        self.camera_position += self.camera_velocity * dt
+        move_distance = self.camera_velocity * dt
+        self.camera.setPos(0, self.camera_position, self.camera_height)
         
-        # Recycle corridor segments when the player moves beyond one segment length
-        # Forward movement
+        # Recycle corridor segments when the camera moves beyond one segment length
+        # Forward movement -----> Recycle segments from the back to the front
         if move_distance > 0:
             self.distance_since_recycle += move_distance
             while self.distance_since_recycle >= self.segment_length:
                 self.corridor.recycle_segment(direction="forward")
                 self.distance_since_recycle -= self.segment_length
-        # Backward movement
+        # Backward movement <----- Recycle segments from the front to the back
         elif move_distance < 0:
             self.distance_since_recycle += move_distance
             while self.distance_since_recycle <= -self.segment_length:
@@ -371,8 +467,8 @@ class MousePortal(ShowBase):
                 self.distance_since_recycle += self.segment_length
         
         # Log movement data (timestamp, position, velocity)
-        self.data_logger.log(time.time(), self.player_position, self.player_velocity)
-
+        self.data_logger.log(time.time(), self.camera_position, self.camera_velocity)
+        
         return Task.cont
 
 if __name__ == "__main__":
