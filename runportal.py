@@ -244,7 +244,7 @@ class FogEffect:
     """
     Class to manage and apply fog to the scene.
     """
-    def __init__(self, base: ShowBase, fog_color, near_distance, far_distance, density):
+    def __init__(self, base: ShowBase, fog_color, density):
         """
         Initialize the fog effect.
         
@@ -261,12 +261,12 @@ class FogEffect:
         # Set fog color.
         self.fog.setColor(*fog_color)
         
-        # Set the near and far distance for the fog.
+        # Set the density and near and far distance for the fog.
         self.fog.setExpDensity(density)  # You can adjust this to get a denser fog effect.
-        self.fog.setLinearRange(near_distance, far_distance)
+        #self.fog.setLinearRange(near_distance, far_distance)
         
         # Attach the fog to the root node to affect the entire scene.
-        self.base.render.setFog(self.fog)
+        render.setFog(self.fog)
 
 
 class SerialInputManager(DirectObject.DirectObject):
@@ -401,8 +401,8 @@ class MousePortal(ShowBase):
         # Add the update task.
         self.taskMgr.add(self.update, "updateTask")
         
-     # Initialize fog effect with default settings (white fog, near 50 units, far 150 units).
-        self.fog_effect = FogEffect(self, fog_color=(0.5, 0.5, 0.5), near_distance=10, far_distance=50, density = 0.001)
+     # Initialize fog effect
+        self.fog_effect = FogEffect(self, fog_color=(0.5, 0.5, 0.5), density = 0.06)
         
         # self.taskMgr.setupTaskChain("serialInputDevice", numThreads = 1, tickClock = None,
         #                threadPriority = None, frameBudget = None,
