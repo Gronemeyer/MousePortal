@@ -402,7 +402,7 @@ class MousePortal(ShowBase):
         self.taskMgr.add(self.update, "updateTask")
         
      # Initialize fog effect
-        self.fog_effect = FogEffect(self, fog_color=(0.5, 0.5, 0.5), density = 0.06)
+        self.fog_effect = FogEffect(self, density= self.cfg["fog_density"], fog_color=(0.5, 0.5, 0.5))
         
         # self.taskMgr.setupTaskChain("serialInputDevice", numThreads = 1, tickClock = None,
         #                threadPriority = None, frameBudget = None,
