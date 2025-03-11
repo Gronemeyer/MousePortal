@@ -261,9 +261,8 @@ class FogEffect:
         # Set fog color.
         self.fog.setColor(*fog_color)
         
-        # Set the density and near and far distance for the fog.
-        self.fog.setExpDensity(density)  # You can adjust this to get a denser fog effect.
-        #self.fog.setLinearRange(near_distance, far_distance)
+        # Set the density for the fog.
+        self.fog.setExpDensity(density)
         
         # Attach the fog to the root node to affect the entire scene.
         render.setFog(self.fog)
