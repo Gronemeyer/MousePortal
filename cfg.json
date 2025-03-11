@@ -6,10 +6,11 @@
     "wall_height": 10.0,
     "num_segments": 50,
     "camera_height": 2.0,
-    "speed_scaling": 30.0,
+    "speed_scaling": 0.05,
     "left_wall_texture": "assets/test3.png",
     "right_wall_texture": "assets/test3.png",
     "floor_texture": "assets/black.png",
     "ceiling_texture": "assets/white.png",
-    "data_logging_file": "maze_data.csv"
+    "data_logging_file": "maze_data.csv",
+    "fog_density": 0.06
 }
