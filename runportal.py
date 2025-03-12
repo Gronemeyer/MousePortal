@@ -382,7 +382,7 @@ class MousePortal(ShowBase):
         self.accept('escape', self.userExit)
 
         # Set up treadmill input
-        self.treadmill = SerialInputManager(serial_port = 'COM6', messenger = self.messenger)   
+        self.treadmill = SerialInputManager(serial_port = self.cfg["serial_port"], messenger = self.messenger)   
 
         # Create corridor geometry.
         self.corridor: Corridor = Corridor(self, self.cfg)

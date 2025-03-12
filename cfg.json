@@ -12,5 +12,6 @@
     "floor_texture": "assets/black.png",
     "ceiling_texture": "assets/white.png",
     "data_logging_file": "maze_data.csv",
-    "fog_density": 0.06
+    "fog_density": 0.06,
+    "serial_port": "COM6"
 }
