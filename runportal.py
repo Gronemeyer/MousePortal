@@ -373,12 +373,15 @@ class MousePortal(ShowBase):
             self.cfg: Dict[str, Any] = load_config(config_file)
 
         # Set window properties
-        wp: WindowProperties = WindowProperties()
+        wp = WindowProperties()
         wp.setSize(self.cfg["window_width"], self.cfg["window_height"])
-        self.win.requestProperties(wp)
         self.setFrameRateMeter(True)
         # Disable default mouse-based camera control for mapped input
         self.disableMouse()
+        wp.setCursorHidden(True)
+        wp.setFullscreen(True)
+        wp.setUndecorated(True)
+        self.win.requestProperties(wp)
         
         # Initialize camera parameters
         self.camera_position: float = 0.0
