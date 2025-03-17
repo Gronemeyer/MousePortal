@@ -220,42 +220,25 @@ class Corridor:
 
         elif direction == "backward":
             new_y = self.left_segments[0].getY() - self.segment_length
-            # Recycle two left wall segments.
-            left_seg1: NodePath = self.left_segments.pop(-1)
-            left_seg1.setY(new_y)
-            self.left_segments.insert(0, left_seg1)
-            
-            left_seg2: NodePath = self.left_segments.pop(-1)
-            left_seg2.setY(new_y - self.segment_length)  # Adjust the Y for the second segment.
-            self.left_segments.insert(0, left_seg2)
+            # Recycle left wall segment.
+            left_seg: NodePath = self.left_segments.pop(-1)
+            left_seg.setY(new_y)
+            self.left_segments.insert(0, left_seg)
 
-            # Recycle two right wall segments.
-            right_seg1: NodePath = self.right_segments.pop(-1)
-            right_seg1.setY(new_y)
-            self.right_segments.insert(0, right_seg1)
-            
-            right_seg2: NodePath = self.right_segments.pop(-1)
-            right_seg2.setY(new_y - self.segment_length)  # Adjust the Y for the second segment.
-            self.right_segments.insert(0, right_seg2)
+            # Recycle right wall segment.
+            right_seg: NodePath = self.right_segments.pop(-1)
+            right_seg.setY(new_y)
+            self.right_segments.insert(0, right_seg)
 
-            # Recycle two ceiling segments.
-            ceiling_seg1: NodePath = self.ceiling_segments.pop(-1)
-            ceiling_seg1.setY(new_y)
-            self.ceiling_segments.insert(0, ceiling_seg1)
-            
-            ceiling_seg2: NodePath = self.ceiling_segments.pop(-1)
-            ceiling_seg2.setY(new_y - self.segment_length)  # Adjust the Y for the second segment.
-            self.ceiling_segments.insert(0, ceiling_seg2)
+            # Recycle ceiling segment.
+            ceiling_seg: NodePath = self.ceiling_segments.pop(-1)
+            ceiling_seg.setY(new_y)
+            self.ceiling_segments.insert(0, ceiling_seg)
 
-            # Recycle two floor segments.
-            floor_seg1: NodePath = self.floor_segments.pop(-1)
-            floor_seg1.setY(new_y)
-            self.floor_segments.insert(0, floor_seg1)
-            
-            floor_seg2: NodePath = self.floor_segments.pop(-1)
-            floor_seg2.setY(new_y - self.segment_length)  # Adjust the Y for the second segment.
-            self.floor_segments.insert(0, floor_seg2)
-            
+            # Recycle floor segment.
+            floor_seg: NodePath = self.floor_segments.pop(-1)
+            floor_seg.setY(new_y)
+            self.floor_segments.insert(0, floor_seg)
             
 class FogEffect:
     """
