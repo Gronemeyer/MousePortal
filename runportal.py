@@ -8,7 +8,7 @@ Features:
 - Configurable parameters loaded from JSON
 - Infinite corridor effect
 - User-controlled movement
-- [real-time] Data logging (timestamp, distance, speed)
+- [real-time] Data logging (timestamp, position, velocity)
 
 The corridor consists of left, right, ceiling, and floor segments.
 It uses the Panda3D CardMaker API to generate flat geometry for the corridor's four faces.
@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog
+from panda3d.core import CardMaker, NodePath, Texture, WindowProperties
 from direct.showbase import DirectObject
 
 
@@ -55,17 +56,6 @@ def load_config(config_file: str) -> Dict[str, Any]:
         print(f"Error loading config file {config_file}: {e}")
         sys.exit(1)
 
-@dataclass
-class EncoderData:
-    """ Represents a single encoder reading."""
-    timestamp: int
-    distance: float
-    speed: float
-
-    def __repr__(self):
-        return (f"EncoderData(timestamp={self.timestamp}, "
-                f"distance={self.distance:.3f} mm, speed={self.speed:.3f} mm/s)")
-
 class DataLogger:
     """
     Logs movement data to a CSV file.
@@ -78,19 +68,31 @@ class DataLogger:
             filename (str): Path to the CSV file.
         """
         self.filename = filename
-        self.fieldnames = ['timestamp', 'distance', 'speed']
+        self.fieldnames = ['timestamp', 'position', 'velocity']
         file_exists = os.path.isfile(self.filename)
         self.file = open(self.filename, 'a', newline='')
         self.writer = csv.DictWriter(self.file, fieldnames=self.fieldnames)
         if not file_exists:
             self.writer.writeheader()
 
-    def log(self, data: EncoderData):
-        self.writer.writerow({'timestamp': data.timestamp, 'distance': data.distance, 'speed': data.speed})
+    def log(self, timestamp, position, velocity):
+        self.writer.writerow({'timestamp': timestamp, 'position': position, 'velocity': velocity})
         self.file.flush()
 
     def close(self):
         self.file.close()
+
+@dataclass
+class EncoderData:
+    """ Represents a single encoder reading."""
+    timestamp: int
+    distance: float
+    speed: float
+
+    def __repr__(self):
+        return (f"EncoderData(timestamp={self.timestamp}, "
+                f"distance={self.distance:.3f} mm, speed={self.speed:.3f} mm/s)")
+
 
 
 class Corridor:
@@ -480,8 +482,8 @@ class MousePortal(ShowBase):
                 self.corridor.recycle_segment(direction="backward")
                 self.distance_since_recycle += self.segment_length
         
-        # Log movement data (timestamp, distance, speed)
-        self.data_logger.log(self.treadmill.data)
+        # Log movement data (timestamp, position, velocity)
+        self.data_logger.log(time.time(), self.camera_position, self.camera_velocity)
         
         return Task.cont
 
