@@ -461,7 +461,7 @@ class MousePortal(ShowBase):
         else:
             self.camera_velocity = 0.0
         
-        self.camera_velocity = (int(self.treadmill.data.speed) / self.cfg["treadmill_speed_scaling"])
+        self.camera_velocity = self.treadmill.data.speed
 
         # Update camera position (movement along the Y axis)
         self.camera_position += self.camera_velocity * dt
