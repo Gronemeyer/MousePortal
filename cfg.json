@@ -15,5 +15,6 @@
     "data_logging_file": "test.csv",
     "fog_density": 0.06,
     "serial_port": "COM5",
-    "test_mode": true
+    "test_mode": true,
+    "new_wall_texture": "assets/left_wall_texture.png"
 }

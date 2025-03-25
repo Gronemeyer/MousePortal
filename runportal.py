@@ -114,6 +114,7 @@ class Corridor:
         self.right_wall_texture: str = config["right_wall_texture"]
         self.ceiling_texture: str = config["ceiling_texture"]
         self.floor_texture: str = config["floor_texture"]
+        self.new_wall_texture: str = config["new_wall_texture"]
         
         # Create a parent node for all corridor segments.
         self.parent: NodePath = base.render.attachNewNode("corridor")
@@ -186,6 +187,53 @@ class Corridor:
         texture: Texture = self.base.loader.loadTexture(texture_path)
         node.setTexture(texture)
         
+    def build_new_wall_segments(self) -> None:
+            """
+            Build new wall segments with a different texture.
+            """
+            # Calculate the starting Y position for the new segments
+            last_segment_y = self.left_segments[-1].getY() + self.segment_length
+            
+            for i in range(self.num_segments):
+                segment_start: float = last_segment_y + i * self.segment_length
+                
+                # ==== Left Wall:
+                cm_left: CardMaker = CardMaker("left_wall")
+                cm_left.setFrame(0, self.segment_length, 0, self.wall_height)
+                left_node: NodePath = self.parent.attachNewNode(cm_left.generate())
+                left_node.setPos(-self.corridor_width / 2, segment_start, 0)
+                left_node.setHpr(90, 0, 0)
+                self.apply_texture(left_node, self.new_wall_texture)
+                self.left_segments.append(left_node)
+                
+                # ==== Right Wall:
+                cm_right: CardMaker = CardMaker("right_wall")
+                cm_right.setFrame(0, self.segment_length, 0, self.wall_height)
+                right_node: NodePath = self.parent.attachNewNode(cm_right.generate())
+                right_node.setPos(self.corridor_width / 2, segment_start, 0)
+                right_node.setHpr(-90, 0, 0)
+                self.apply_texture(right_node, self.new_wall_texture)
+                self.right_segments.append(right_node)
+                
+                # ==== Ceiling (Top):
+                cm_ceiling: CardMaker = CardMaker("ceiling")
+                cm_ceiling.setFrame(-self.corridor_width / 2, self.corridor_width / 2, 0, self.segment_length)
+                ceiling_node: NodePath = self.parent.attachNewNode(cm_ceiling.generate())
+                ceiling_node.setPos(0, segment_start, self.wall_height)
+                ceiling_node.setHpr(0, 90, 0)
+                self.apply_texture(ceiling_node, self.ceiling_texture)
+                self.ceiling_segments.append(ceiling_node)
+                
+                # ==== Floor (Bottom):
+                cm_floor: CardMaker = CardMaker("floor")
+                cm_floor.setFrame(-self.corridor_width / 2, self.corridor_width / 2, 0, self.segment_length)
+                floor_node: NodePath = self.parent.attachNewNode(cm_floor.generate())
+                floor_node.setPos(0, segment_start, 0)
+                floor_node.setHpr(0, -90, 0)
+                self.apply_texture(floor_node, self.floor_texture)
+                self.floor_segments.append(floor_node)
+                
+
     def recycle_segment(self, direction: str) -> None:
         """
         Recycle the front segments by repositioning them to the end of the corridor.
@@ -452,6 +500,7 @@ class MousePortal(ShowBase):
         self.accept("arrow_down", self.set_key, ["backward", True])
         self.accept("arrow_down-up", self.set_key, ["backward", False])
         self.accept('escape', self.userExit)
+        self.accept('f', self.change_wall_texture)  # Add this line to listen for the 'F' key
 
         # Set up treadmill input
         self.treadmill = SerialInputManager(serial_port=self.cfg["serial_port"], messenger=self.messenger, test_mode=self.cfg.get("test_mode", False))   
@@ -491,6 +540,12 @@ class MousePortal(ShowBase):
             value (bool): True if pressed, False if released.
         """
         self.key_map[key] = value
+
+    def change_wall_texture(self) -> None:
+        """
+        Change the wall texture to a new texture.
+        """
+        self.corridor.build_new_wall_segments()
         
     def update(self, task: Task) -> Task:
         """
