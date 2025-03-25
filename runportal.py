@@ -28,6 +28,7 @@ import csv
 import os
 import time
 import serial
+import random
 from typing import Any, Dict
 from dataclasses import dataclass
 
@@ -127,8 +128,8 @@ class Corridor:
         
         self.build_segments()
         
-        # Add a task to change textures every 5 seconds.
-        self.base.taskMgr.doMethodLater(10, self.change_wall_textures, "changeWallTexturesTask")
+        # Add a task to change textures at a random interval.
+        self.schedule_texture_change()
 
     def build_segments(self) -> None:
         """ 
@@ -267,17 +268,43 @@ class Corridor:
         Returns:
             Task: Continuation signal for the task manager.
         """
-        # Swap the textures
-        #self.left_wall_texture, self.right_wall_texture = self.special_wall, self.special_wall
         
         # Apply the new textures to the walls
         for left_node in self.left_segments:
             self.apply_texture(left_node, self.special_wall)
         for right_node in self.right_segments:
             self.apply_texture(right_node, self.special_wall)
+            
+        # Schedule the task to revert the textures after 5 seconds
+        self.base.taskMgr.doMethodLater(5, self.revert_wall_textures, "revertWallTexturesTask")
+        return task.done
+
+    def revert_wall_textures(self, task: Task) -> Task:
+        """
+        Revert the textures of the left and right walls to their original textures.
         
-        # Schedule the next texture change
-        return task.again
+        Parameters:
+            task (Task): The Panda3D task instance.
+            
+        Returns:
+            Task: Continuation signal for the task manager.
+        """
+        # Reapply the original textures to the walls
+        for left_node in self.left_segments:
+            self.apply_texture(left_node, self.left_wall_texture)
+        for right_node in self.right_segments:
+            self.apply_texture(right_node, self.right_wall_texture)
+            
+        # Schedule the next texture change at a random interval
+        self.schedule_texture_change()
+        return task.done
+
+    def schedule_texture_change(self) -> None:
+        """
+        Schedule the next texture change at a random interval.
+        """
+        interval = random.uniform(3, 10)  # Random interval between 3 and 10 seconds
+        self.base.taskMgr.doMethodLater(interval, self.change_wall_textures, "changeWallTexturesTask")
             
 class FogEffect:
     """
