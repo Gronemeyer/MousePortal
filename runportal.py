@@ -290,14 +290,29 @@ class SerialInputManager(DirectObject.DirectObject):
     This class abstracts the serial connection and starts a thread that listens
     for serial data.
     """
-    def __init__(self, serial_port: str, baudrate: int = 57600, messenger: DirectObject = None) -> None:
+    def __init__(self, serial_port: str, baudrate: int = 57600, messenger: DirectObject = None, test_mode: bool = False) -> None:
         self._port = serial_port
         self._baud = baudrate
-        try:
-            self.serial = serial.Serial(self._port, self._baud, timeout=1)
-        except serial.SerialException as e:
-            print(f"{self.__class__}: I failed to open serial port {self._port}: {e}")
-            raise
+        self.test_mode = test_mode
+        self.test_file = None
+        self.test_reader = None
+        self.test_data = None
+
+        if self.test_mode:
+            try:
+                self.test_file = open('test.csv', 'r')
+                self.test_reader = csv.reader(self.test_file)
+                next(self.test_reader)  # Skip header
+            except Exception as e:
+                print(f"Failed to open test.csv: {e}")
+                raise
+        else:
+            try:
+                self.serial = serial.Serial(self._port, self._baud, timeout=1)
+            except serial.SerialException as e:
+                print(f"{self.__class__}: I failed to open serial port {self._port}: {e}")
+                raise
+
         self.accept('readSerial', self._store_data)
         self.data = EncoderData(0, 0.0, 0.0)
         self.messenger = messenger
@@ -306,16 +321,28 @@ class SerialInputManager(DirectObject.DirectObject):
         self.data = data
 
     def _read_serial(self, task: Task) -> Task:
-        """Internal loop for continuously reading lines from the serial port."""
-        # Read a line from the Teensy board
-        raw_line = self.serial.readline()
-
-        # Decode and strip newline characters
-        line = raw_line.decode('utf-8', errors='replace').strip()
-        if line:
-            data = self._parse_line(line)
-            if data:
-                self.messenger.send("readSerial", [data])
+        """Internal loop for continuously reading lines from the serial port or test.csv."""
+        if self.test_mode:
+            try:
+                line = next(self.test_reader)
+                if line:
+                    data = self._parse_line_from_csv(line)
+                    if data:
+                        self.messenger.send("readSerial", [data])
+            except StopIteration:
+                # Restart the test file reading from the beginning
+                self.test_file.seek(0)
+                self.test_reader = csv.reader(self.test_file)
+                next(self.test_reader)  # Skip header
+        else:
+            # Read a line from the Teensy board
+            raw_line = self.serial.readline()
+            # Decode and strip newline characters
+            line = raw_line.decode('utf-8', errors='replace').strip()
+            if line:
+                data = self._parse_line(line)
+                if data:
+                    self.messenger.send("readSerial", [data])
 
         return Task.cont
 
@@ -353,7 +380,34 @@ class SerialInputManager(DirectObject.DirectObject):
             # Non-numeric data (e.g., header info)
             return None
 
-    
+    def _parse_line_from_csv(self, line: list):
+        """
+        Parse a line from the test.csv file.
+
+        Expected line format:
+          - "timestamp,distance,speed"
+
+        Args:
+            line (list): A single line from the CSV file.
+
+        Returns:
+            EncoderData: An instance with parsed values, or None if parsing fails.
+        """
+        try:
+            timestamp = int(line[0].strip())
+            distance = float(line[1].strip())
+            speed = float(line[2].strip())
+            return EncoderData(distance=distance, speed=speed, timestamp=timestamp)
+        except ValueError:
+            # Non-numeric data (e.g., header info)
+            return None
+
+    def close(self):
+        if self.test_mode and self.test_file:
+            self.test_file.close()
+        elif not self.test_mode and self.serial:
+            self.serial.close()
+
 
 class MousePortal(ShowBase):
     """
@@ -375,7 +429,7 @@ class MousePortal(ShowBase):
         # Set window properties
         wp = WindowProperties()
         wp.setSize(self.cfg["window_width"], self.cfg["window_height"])
-        self.setFrameRateMeter(True)
+        self.setFrameRateMeter(False)
         # Disable default mouse-based camera control for mapped input
         self.disableMouse()
         wp.setCursorHidden(True)
@@ -400,7 +454,7 @@ class MousePortal(ShowBase):
         self.accept('escape', self.userExit)
 
         # Set up treadmill input
-        self.treadmill = SerialInputManager(serial_port = self.cfg["serial_port"], messenger = self.messenger)   
+        self.treadmill = SerialInputManager(serial_port=self.cfg["serial_port"], messenger=self.messenger, test_mode=self.cfg.get("test_mode", False))   
 
         # Create corridor geometry.
         self.corridor: Corridor = Corridor(self, self.cfg)
@@ -418,17 +472,15 @@ class MousePortal(ShowBase):
         # Add the update task.
         self.taskMgr.add(self.update, "updateTask")
         
-     # Initialize fog effect
-        self.fog_effect = FogEffect(self, density= self.cfg["fog_density"], fog_color=(0.5, 0.5, 0.5))
+        # Initialize fog effect
+        self.fog_effect = FogEffect(self, density=self.cfg["fog_density"], fog_color=(0.5, 0.5, 0.5))
         
-        # self.taskMgr.setupTaskChain("serialInputDevice", numThreads = 1, tickClock = None,
-        #                threadPriority = None, frameBudget = None,
-        #                frameSync = True, timeslicePriority = None)
-        self.taskMgr.add(self.treadmill._read_serial, name = "readSerial")
+        # self.taskMgr.setupTaskChain("serialInputDevice", numThreads=1, tickClock=None,
+        #                threadPriority=None, frameBudget=None,
+        #                frameSync=True, timeslicePriority=None)
+        self.taskMgr.add(self.treadmill._read_serial, name="readSerial")
 
         self.messenger.toggleVerbose()
-
-
 
     def set_key(self, key: str, value: bool) -> None:
         """
