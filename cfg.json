@@ -6,13 +6,14 @@
     "wall_height": 10.0,
     "num_segments": 50,
     "camera_height": 2.0,
-    "treadmill_speed_scaling": 2,
-    "speed_scaling": 0.000005,
+    "treadmill_speed_scaling": 3,
+    "speed_scaling": 0.05,
     "left_wall_texture": "assets/test3.png",
     "right_wall_texture": "assets/test3.png",
     "floor_texture": "assets/black.png",
     "ceiling_texture": "assets/white.png",
     "data_logging_file": "test.csv",
     "fog_density": 0.06,
-    "serial_port": "COM6"
+    "serial_port": "COM5",
+    "special_wall": "assets/left_wall_texture.png"
 }

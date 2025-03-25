@@ -114,6 +114,7 @@ class Corridor:
         self.right_wall_texture: str = config["right_wall_texture"]
         self.ceiling_texture: str = config["ceiling_texture"]
         self.floor_texture: str = config["floor_texture"]
+        self.special_wall: str = config["special_wall"]
         
         # Create a parent node for all corridor segments.
         self.parent: NodePath = base.render.attachNewNode("corridor")
@@ -126,6 +127,9 @@ class Corridor:
         
         self.build_segments()
         
+        # Add a task to change textures every 5 seconds.
+        self.base.taskMgr.doMethodLater(10, self.change_wall_textures, "changeWallTexturesTask")
+
     def build_segments(self) -> None:
         """ 
         Build the initial corridor segments using CardMaker.
@@ -143,7 +147,6 @@ class Corridor:
             # Position the left wall at x = -corridor_width/2 and at the starting Y position
             left_node.setPos(-self.corridor_width / 2, segment_start, 0)
             # Rotate to face inward (rotate around Z axis by 90°)
-            # This maps the card's original X (now wall height) to the Z axis and Y remains.
             left_node.setHpr(90, 0, 0)
             self.apply_texture(left_node, self.left_wall_texture)
             self.left_segments.append(left_node)
@@ -254,6 +257,27 @@ class Corridor:
             floor_seg2.setY(new_y - self.segment_length)  # Adjust the Y for the second segment.
             self.floor_segments.insert(0, floor_seg2)
             
+    def change_wall_textures(self, task: Task) -> Task:
+        """
+        Change the textures of the left and right walls.
+        
+        Parameters:
+            task (Task): The Panda3D task instance.
+            
+        Returns:
+            Task: Continuation signal for the task manager.
+        """
+        # Swap the textures
+        #self.left_wall_texture, self.right_wall_texture = self.special_wall, self.special_wall
+        
+        # Apply the new textures to the walls
+        for left_node in self.left_segments:
+            self.apply_texture(left_node, self.special_wall)
+        for right_node in self.right_segments:
+            self.apply_texture(right_node, self.special_wall)
+        
+        # Schedule the next texture change
+        return task.again
             
 class FogEffect:
     """
@@ -375,7 +399,7 @@ class MousePortal(ShowBase):
         # Set window properties
         wp = WindowProperties()
         wp.setSize(self.cfg["window_width"], self.cfg["window_height"])
-        self.setFrameRateMeter(True)
+        self.setFrameRateMeter(False)
         # Disable default mouse-based camera control for mapped input
         self.disableMouse()
         wp.setCursorHidden(True)
