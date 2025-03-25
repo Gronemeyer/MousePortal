@@ -500,7 +500,6 @@ class MousePortal(ShowBase):
         self.accept("arrow_down", self.set_key, ["backward", True])
         self.accept("arrow_down-up", self.set_key, ["backward", False])
         self.accept('escape', self.userExit)
-        self.accept('f', self.change_wall_texture)  # Add this line to listen for the 'F' key
 
         # Set up treadmill input
         self.treadmill = SerialInputManager(serial_port=self.cfg["serial_port"], messenger=self.messenger, test_mode=self.cfg.get("test_mode", False))   
@@ -528,6 +527,9 @@ class MousePortal(ShowBase):
         #                threadPriority=None, frameBudget=None,
         #                frameSync=True, timeslicePriority=None)
         self.taskMgr.add(self.treadmill._read_serial, name="readSerial")
+        
+        # Schedule the change_wall_texture task to run every 5 seconds
+        self.taskMgr.doMethodLater(5, self.change_wall_texture_task, "changeWallTextureTask")
 
         self.messenger.toggleVerbose()
 
@@ -546,6 +548,20 @@ class MousePortal(ShowBase):
         Change the wall texture to a new texture.
         """
         self.corridor.build_new_wall_segments()
+        
+
+    def change_wall_texture_task(self, task: Task) -> Task:
+        """
+        Task to change the wall texture and reschedule itself.
+        
+        Parameters:
+            task (Task): The Panda3D task instance.
+            
+        Returns:
+            Task: Continuation signal for the task manager.
+        """
+        self.change_wall_texture()
+        return task.again  # Reschedule the task
         
     def update(self, task: Task) -> Task:
         """
