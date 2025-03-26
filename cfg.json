@@ -4,7 +4,7 @@
     "segment_length": 10.0,
     "corridor_width": 8.0,
     "wall_height": 10.0,
-    "num_segments": 50,
+    "num_segments": 12,
     "camera_height": 2.0,
     "treadmill_speed_scaling": 2,
     "speed_scaling": 0.000005,

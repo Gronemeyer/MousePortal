@@ -187,52 +187,54 @@ class Corridor:
         texture: Texture = self.base.loader.loadTexture(texture_path)
         node.setTexture(texture)
         
-    def build_new_wall_segments(self) -> None:
-            """
-            Build new wall segments with a different texture.
-            """
-            # Calculate the starting Y position for the new segments
-            last_segment_y = self.left_segments[-1].getY() + self.segment_length
+    def build_new_wall_segments(self, num_segments: int) -> None:
+        """
+        Build new wall segments with a different texture.
+        
+        Parameters:
+            num_segments (int): Number of new segments to build.
+        """
+        # Calculate the starting Y position for the new segments
+        last_segment_y = self.left_segments[-1].getY() + self.segment_length
+        
+        for i in range(num_segments):
+            segment_start: float = last_segment_y + i * self.segment_length
             
-            for i in range(self.num_segments):
-                segment_start: float = last_segment_y + i * self.segment_length
-                
-                # ==== Left Wall:
-                cm_left: CardMaker = CardMaker("left_wall")
-                cm_left.setFrame(0, self.segment_length, 0, self.wall_height)
-                left_node: NodePath = self.parent.attachNewNode(cm_left.generate())
-                left_node.setPos(-self.corridor_width / 2, segment_start, 0)
-                left_node.setHpr(90, 0, 0)
-                self.apply_texture(left_node, self.new_wall_texture)
-                self.left_segments.append(left_node)
-                
-                # ==== Right Wall:
-                cm_right: CardMaker = CardMaker("right_wall")
-                cm_right.setFrame(0, self.segment_length, 0, self.wall_height)
-                right_node: NodePath = self.parent.attachNewNode(cm_right.generate())
-                right_node.setPos(self.corridor_width / 2, segment_start, 0)
-                right_node.setHpr(-90, 0, 0)
-                self.apply_texture(right_node, self.new_wall_texture)
-                self.right_segments.append(right_node)
-                
-                # ==== Ceiling (Top):
-                cm_ceiling: CardMaker = CardMaker("ceiling")
-                cm_ceiling.setFrame(-self.corridor_width / 2, self.corridor_width / 2, 0, self.segment_length)
-                ceiling_node: NodePath = self.parent.attachNewNode(cm_ceiling.generate())
-                ceiling_node.setPos(0, segment_start, self.wall_height)
-                ceiling_node.setHpr(0, 90, 0)
-                self.apply_texture(ceiling_node, self.ceiling_texture)
-                self.ceiling_segments.append(ceiling_node)
-                
-                # ==== Floor (Bottom):
-                cm_floor: CardMaker = CardMaker("floor")
-                cm_floor.setFrame(-self.corridor_width / 2, self.corridor_width / 2, 0, self.segment_length)
-                floor_node: NodePath = self.parent.attachNewNode(cm_floor.generate())
-                floor_node.setPos(0, segment_start, 0)
-                floor_node.setHpr(0, -90, 0)
-                self.apply_texture(floor_node, self.floor_texture)
-                self.floor_segments.append(floor_node)
-                
+            # ==== Left Wall:
+            cm_left: CardMaker = CardMaker("left_wall")
+            cm_left.setFrame(0, self.segment_length, 0, self.wall_height)
+            left_node: NodePath = self.parent.attachNewNode(cm_left.generate())
+            left_node.setPos(-self.corridor_width / 2, segment_start, 0)
+            left_node.setHpr(90, 0, 0)
+            self.apply_texture(left_node, self.new_wall_texture)
+            self.left_segments.append(left_node)
+            
+            # ==== Right Wall:
+            cm_right: CardMaker = CardMaker("right_wall")
+            cm_right.setFrame(0, self.segment_length, 0, self.wall_height)
+            right_node: NodePath = self.parent.attachNewNode(cm_right.generate())
+            right_node.setPos(self.corridor_width / 2, segment_start, 0)
+            right_node.setHpr(-90, 0, 0)
+            self.apply_texture(right_node, self.new_wall_texture)
+            self.right_segments.append(right_node)
+            
+            # ==== Ceiling (Top):
+            cm_ceiling: CardMaker = CardMaker("ceiling")
+            cm_ceiling.setFrame(-self.corridor_width / 2, self.corridor_width / 2, 0, self.segment_length)
+            ceiling_node: NodePath = self.parent.attachNewNode(cm_ceiling.generate())
+            ceiling_node.setPos(0, segment_start, self.wall_height)
+            ceiling_node.setHpr(0, 90, 0)
+            self.apply_texture(ceiling_node, self.ceiling_texture)
+            self.ceiling_segments.append(ceiling_node)
+            
+            # ==== Floor (Bottom):
+            cm_floor: CardMaker = CardMaker("floor")
+            cm_floor.setFrame(-self.corridor_width / 2, self.corridor_width / 2, 0, self.segment_length)
+            floor_node: NodePath = self.parent.attachNewNode(cm_floor.generate())
+            floor_node.setPos(0, segment_start, 0)
+            floor_node.setHpr(0, -90, 0)
+            self.apply_texture(floor_node, self.floor_texture)
+            self.floor_segments.append(floor_node)
 
     def recycle_segment(self, direction: str) -> None:
         """
@@ -433,7 +435,7 @@ class SerialInputManager(DirectObject.DirectObject):
         Parse a line from the test.csv file.
 
         Expected line format:
-          - "timestamp,distance,speed"
+          - "timestamp, distance, speed"
 
         Args:
             line (list): A single line from the CSV file.
@@ -547,7 +549,7 @@ class MousePortal(ShowBase):
         """
         Change the wall texture to a new texture.
         """
-        self.corridor.build_new_wall_segments()
+        self.corridor.build_new_wall_segments(self.cfg["num_segments"])
         
 
     def change_wall_texture_task(self, task: Task) -> Task:
