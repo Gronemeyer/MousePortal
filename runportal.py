@@ -258,17 +258,16 @@ class Corridor:
             floor_seg2.setY(new_y - self.segment_length)  # Adjust the Y for the second segment.
             self.floor_segments.insert(0, floor_seg2)
             
-    def change_wall_textures(self, task: Task) -> Task:
+    def change_wall_textures(self, task: Task = None) -> Task:
         """
         Change the textures of the left and right walls.
         
         Parameters:
-            task (Task): The Panda3D task instance.
+            task (Task): The Panda3D task instance (optional).
             
         Returns:
             Task: Continuation signal for the task manager.
         """
-        
         # Apply the new textures to the walls
         for left_node in self.left_segments:
             self.apply_texture(left_node, self.special_wall)
@@ -277,14 +276,16 @@ class Corridor:
             
         # Schedule the task to revert the textures after 5 seconds
         self.base.taskMgr.doMethodLater(5, self.revert_wall_textures, "revertWallTexturesTask")
-        return task.done
+        
+        # Return Task.done if task is None
+        return Task.done if task is None else task.done
 
-    def revert_wall_textures(self, task: Task) -> Task:
+    def revert_wall_textures(self, task: Task = None) -> Task:
         """
         Revert the textures of the left and right walls to their original textures.
         
         Parameters:
-            task (Task): The Panda3D task instance.
+            task (Task): The Panda3D task instance (optional).
             
         Returns:
             Task: Continuation signal for the task manager.
@@ -295,16 +296,27 @@ class Corridor:
         for right_node in self.right_segments:
             self.apply_texture(right_node, self.right_wall_texture)
             
-        # Schedule the next texture change at a random interval
+        # Schedule the next texture change
         self.schedule_texture_change()
-        return task.done
+        
+        # Return Task.done if task is None
+        return Task.done if task is None else task.done
 
     def schedule_texture_change(self) -> None:
         """
-        Schedule the next texture change at a random interval.
+        Schedule the next texture change after a random number of wall segments (between 3 and 10) are recycled.
         """
-        interval = random.uniform(3, 10)  # Random interval between 3 and 10 seconds
-        self.base.taskMgr.doMethodLater(interval, self.change_wall_textures, "changeWallTexturesTask")
+        # Randomly determine the number of segments after which to change the texture
+        segments_to_wait = random.randint(10, 35)
+        self.segments_until_texture_change = segments_to_wait
+
+    def update_texture_change(self) -> None:
+        """
+        Check if the required number of segments has been recycled and change the texture if needed.
+        """
+        if self.segments_until_texture_change <= 0:
+            self.change_wall_textures(None)  # Trigger the texture change
+            self.schedule_texture_change()  # Schedule the next texture change
             
 class FogEffect:
     """
@@ -527,12 +539,16 @@ class MousePortal(ShowBase):
             while self.distance_since_recycle >= self.segment_length:
                 self.corridor.recycle_segment(direction="forward")
                 self.distance_since_recycle -= self.segment_length
+                self.corridor.segments_until_texture_change -= 1  # Decrement the texture change counter
+                self.corridor.update_texture_change()  # Check and update texture change logic
         # Backward movement <----- Recycle segments from the front to the back
         elif move_distance < 0:
             self.distance_since_recycle += move_distance
             while self.distance_since_recycle <= -self.segment_length:
                 self.corridor.recycle_segment(direction="backward")
                 self.distance_since_recycle += self.segment_length
+                #self.corridor.segments_until_texture_change -= 1  # Decrement the texture change counter
+                self.corridor.update_texture_change()  # Check and update texture change logic
         
         # Log movement data (timestamp, distance, speed)
         self.data_logger.log(self.treadmill.data)
