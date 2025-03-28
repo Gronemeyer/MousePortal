@@ -122,6 +122,8 @@ class Corridor:
         self.ceiling_texture: str = config["ceiling_texture"]
         self.floor_texture: str = config["floor_texture"]
         self.special_wall: str = config["special_wall"]
+        self.alternative_wall_texture_1 = config["alternative_wall_texture_1"]
+        self.alternative_wall_texture_2 = config["alternative_wall_texture_2"]
         
         # Create a parent node for all corridor segments.
         self.parent: NodePath = base.render.attachNewNode("corridor")
@@ -266,7 +268,7 @@ class Corridor:
             
     def change_wall_textures(self, task: Task = None) -> Task:
         """
-        Change the textures of the left and right walls.
+        Change the textures of the left and right walls to a randomly selected texture.
         
         Parameters:
             task (Task): The Panda3D task instance (optional).
@@ -274,11 +276,21 @@ class Corridor:
         Returns:
             Task: Continuation signal for the task manager.
         """
-        # Apply the new textures to the walls
+        # Define a list of possible wall textures
+        wall_textures = [
+            self.special_wall,  # Texture 1
+            self.alternative_wall_texture_1,  # Texture 2
+            self.alternative_wall_texture_2   # Texture 3
+        ]
+        
+        # Randomly select a texture
+        selected_texture = random.choice(wall_textures)
+        
+        # Apply the selected texture to the walls
         for left_node in self.left_segments:
-            self.apply_texture(left_node, self.special_wall)
+            self.apply_texture(left_node, selected_texture)
         for right_node in self.right_segments:
-            self.apply_texture(right_node, self.special_wall)
+            self.apply_texture(right_node, selected_texture)
             
         # Schedule the task to revert the textures after 5 seconds
         self.base.taskMgr.doMethodLater(5, self.revert_wall_textures, "revertWallTexturesTask")
