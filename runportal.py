@@ -29,6 +29,7 @@ import os
 import time
 import serial
 import random
+import numpy as np
 from typing import Any, Dict
 from dataclasses import dataclass
 
@@ -36,6 +37,11 @@ from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog
 from direct.showbase import DirectObject
+
+# Generate 1000 random samples from a normal distribution with mean 25 and standard deviation 5
+gaussian_data = np.random.normal(loc=25, scale=5, size=1000)
+rounded_gaussian_data = np.round(gaussian_data)
+print(rounded_gaussian_data)
 
 
 def load_config(config_file: str) -> Dict[str, Any]:
@@ -304,10 +310,11 @@ class Corridor:
 
     def schedule_texture_change(self) -> None:
         """
-        Schedule the next texture change after a random number of wall segments (between 3 and 10) are recycled.
+        Schedule the next texture change after a random number of wall segments are recycled.
         """
         # Randomly determine the number of segments after which to change the texture
-        segments_to_wait = random.randint(10, 35)
+        segments_to_wait = random.choice(rounded_gaussian_data)
+        print(segments_to_wait)
         self.segments_until_texture_change = segments_to_wait
 
     def update_texture_change(self) -> None:
