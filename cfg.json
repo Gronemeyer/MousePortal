@@ -14,6 +14,8 @@
     "ceiling_texture": "assets/white.png",
     "data_logging_file": "test.csv",
     "fog_density": 0.06,
-    "serial_port": "COM5",
-    "special_wall": "assets/left_wall_texture.png"
+    "serial_port": "COM8",
+    "special_wall": "assets/left_wall_texture.png", 
+    "alternative_wall_texture_1": "assets/Sine_pattern.png",
+    "alternative_wall_texture_2": "assets/horizontal.png"
 }
