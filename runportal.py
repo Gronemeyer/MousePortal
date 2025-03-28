@@ -203,68 +203,53 @@ class Corridor:
         Recycle the front segments by repositioning them to the end of the corridor.
         This is called when the player has advanced by one segment length.
         """
-        # Calculate new base Y position from the last segment in the left wall.
-        new_y: float = self.left_segments[-1].getY() + self.segment_length
-        
         if direction == "forward":
-            new_y = self.left_segments[-1].getY() + self.segment_length
+            # Calculate new base Y position from the last segment in the left wall.
+            new_y: float = self.left_segments[-1].getY() + self.segment_length
+
             # Recycle left wall segment.
             left_seg: NodePath = self.left_segments.pop(0)
             left_seg.setY(new_y)
             self.left_segments.append(left_seg)
-            
+
             # Recycle right wall segment.
             right_seg: NodePath = self.right_segments.pop(0)
             right_seg.setY(new_y)
             self.right_segments.append(right_seg)
-            
+
             # Recycle ceiling segment.
             ceiling_seg: NodePath = self.ceiling_segments.pop(0)
             ceiling_seg.setY(new_y)
             self.ceiling_segments.append(ceiling_seg)
-            
+
             # Recycle floor segment.
             floor_seg: NodePath = self.floor_segments.pop(0)
             floor_seg.setY(new_y)
             self.floor_segments.append(floor_seg)
 
         elif direction == "backward":
-            new_y = self.left_segments[0].getY() - self.segment_length
-            # Recycle two left wall segments.
-            left_seg1: NodePath = self.left_segments.pop(-1)
-            left_seg1.setY(new_y)
-            self.left_segments.insert(0, left_seg1)
-            
-            left_seg2: NodePath = self.left_segments.pop(-1)
-            left_seg2.setY(new_y - self.segment_length)  # Adjust the Y for the second segment.
-            self.left_segments.insert(0, left_seg2)
+            # Calculate new base Y position from the first segment in the left wall.
+            new_y: float = self.left_segments[0].getY() - self.segment_length
 
-            # Recycle two right wall segments.
-            right_seg1: NodePath = self.right_segments.pop(-1)
-            right_seg1.setY(new_y)
-            self.right_segments.insert(0, right_seg1)
-            
-            right_seg2: NodePath = self.right_segments.pop(-1)
-            right_seg2.setY(new_y - self.segment_length)  # Adjust the Y for the second segment.
-            self.right_segments.insert(0, right_seg2)
+            # Recycle left wall segment.
+            left_seg: NodePath = self.left_segments.pop(-1)
+            left_seg.setY(new_y)
+            self.left_segments.insert(0, left_seg)
 
-            # Recycle two ceiling segments.
-            ceiling_seg1: NodePath = self.ceiling_segments.pop(-1)
-            ceiling_seg1.setY(new_y)
-            self.ceiling_segments.insert(0, ceiling_seg1)
-            
-            ceiling_seg2: NodePath = self.ceiling_segments.pop(-1)
-            ceiling_seg2.setY(new_y - self.segment_length)  # Adjust the Y for the second segment.
-            self.ceiling_segments.insert(0, ceiling_seg2)
+            # Recycle right wall segment.
+            right_seg: NodePath = self.right_segments.pop(-1)
+            right_seg.setY(new_y)
+            self.right_segments.insert(0, right_seg)
 
-            # Recycle two floor segments.
-            floor_seg1: NodePath = self.floor_segments.pop(-1)
-            floor_seg1.setY(new_y)
-            self.floor_segments.insert(0, floor_seg1)
-            
-            floor_seg2: NodePath = self.floor_segments.pop(-1)
-            floor_seg2.setY(new_y - self.segment_length)  # Adjust the Y for the second segment.
-            self.floor_segments.insert(0, floor_seg2)
+            # Recycle ceiling segment.
+            ceiling_seg: NodePath = self.ceiling_segments.pop(-1)
+            ceiling_seg.setY(new_y)
+            self.ceiling_segments.insert(0, ceiling_seg)
+
+            # Recycle floor segment.
+            floor_seg: NodePath = self.floor_segments.pop(-1)
+            floor_seg.setY(new_y)
+            self.floor_segments.insert(0, floor_seg)
             
     def change_wall_textures(self, task: Task = None) -> Task:
         """
