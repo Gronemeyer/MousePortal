@@ -17,5 +17,6 @@
     "serial_port": "COM8",
     "special_wall": "assets/left_wall_texture.png", 
     "alternative_wall_texture_1": "assets/Sine_pattern.png",
-    "alternative_wall_texture_2": "assets/horizontal.png"
+    "alternative_wall_texture_2": "assets/horizontal.png",
+    "test_mode": false
 }
