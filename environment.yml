@@ -1,0 +1,15 @@
+name: mouse-portal
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10,<3.13
+  - panda3d
+  - pyserial
+  - pip
+  # Development dependencies
+  - black
+  - flake8
+  - pytest
+  # Pip-only dependencies
+  - pip:
+    - types-panda3d

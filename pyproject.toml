@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mouse-portal"
+version = "0.2.0"
+description = "Infinite Corridor using Panda3D for mouse behavioral experiments"
+authors = [
+    {name = "Jake Gronemeyer", email = "jvg6244@psu.edu"}
+]
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Multimedia :: Graphics :: 3D Rendering",
+]
+dependencies = [
+    "panda3d>=1.10.0",
+    "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "types-panda3d",
+    "mypy",
+    "black",
+    "flake8",
+    "pytest",
+]
+
+[project.scripts]
+mouse-portal = "runportal:main"
+
+[tool.setuptools]
+py-modules = ["runportal"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+# Conda environment configuration
+[tool.conda-env]
+name = "mouse-portal"
+channels = ["conda-forge"]
+dependencies = [
+    "python>=3.10,<3.13",
+    "panda3d>=1.10.0",
+    "pyserial",
+    "pip",
+    # Development dependencies
+    "mypy",
+    "black",
+    "flake8", 
+    "pytest",
+    # Pip dependencies that aren't available in conda
+    {pip = [
+        "types-panda3d"
+    ]}
+]
+
+[tool.conda-env.post-install]
+commands = [
+    "python -m pip install --upgrade types-panda3d"
+]
