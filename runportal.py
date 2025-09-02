@@ -41,6 +41,20 @@ from direct.fsm.FSM import FSM
 from direct.gui.OnscreenText import OnscreenText
 from panda3d.core import TextNode
 
+# ─── Fix for running as subprocess ─────────────────────────────────────────────────────
+# https://raw.githubusercontent.com/panda3d/panda3d/release/1.10.x/panda/src/doc/howto.use_config.txt
+# https://stackoverflow.com/questions/73900341/what-is-the-path-of-config-prc-files-in-panda3d
+
+
+# Configure Panda3D before any ShowBase initialization
+from panda3d.core import loadPrcFileData
+    
+# Set essential graphics configuration
+loadPrcFileData('', 'load-display pandagl')
+loadPrcFileData('', 'aux-display pandadx9') 
+loadPrcFileData('', 'aux-display pandadx8')
+loadPrcFileData('', 'aux-display tinydisplay')
+loadPrcFileData('', 'window-title MousePortal')
 
 def load_config(config_file: str) -> Dict[str, Any]:
     """
@@ -431,7 +445,7 @@ class MousePortal(ShowBase):
 
         # Set window properties to span across both monitors
         wp: WindowProperties = WindowProperties()
-        wp.setSize(1280 * 2, 800)  # Double the width for two
+        wp.setSize(1920 * 2, 1280)  # Double the width for two
         wp.set_origin(display_width, 0)
         self.dev = dev
         self.win.requestProperties(wp)
