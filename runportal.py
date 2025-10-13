@@ -30,7 +30,7 @@ import time
 import serial
 import threading
 import queue
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from dataclasses import dataclass
 
 from direct.showbase.ShowBase import ShowBase
@@ -40,6 +40,8 @@ from direct.showbase import DirectObject
 from direct.fsm.FSM import FSM
 from direct.gui.OnscreenText import OnscreenText
 from panda3d.core import TextNode
+
+from portal_socket import PortalServer
 
 # ─── Fix for running as subprocess ─────────────────────────────────────────────────────
 # https://raw.githubusercontent.com/panda3d/panda3d/release/1.10.x/panda/src/doc/howto.use_config.txt
@@ -112,7 +114,7 @@ class EventLogger:
         if not file_exists:
             self.writer.writeheader()
 
-    def log(self, time_sent: float, time_received: float, position: float, name: str) -> None:
+    def log(self, time_sent: float | None, time_received: float, position: float, name: str) -> None:
         delta = time_received - time_sent if time_sent is not None else None
         self.writer.writerow({
             'time_sent': time_sent,
@@ -424,7 +426,16 @@ class MousePortal(ShowBase):
     """
     Main application class for Mouse Portal's infinite corridor.
     """
-    def __init__(self, config_file, dev: bool = False) -> None:
+    def __init__(
+        self,
+        config_file,
+        dev: bool = False,
+        *,
+        socket_host: Optional[str] = None,
+        socket_port: Optional[int] = None,
+        enable_socket: bool = True,
+        status_interval: float = 0.1,
+    ) -> None:
         """
         Initialize the application, load configuration, set up the camera, user input,
         corridor geometry, and add the update task.
@@ -436,6 +447,22 @@ class MousePortal(ShowBase):
         # Load configuration (init option for testing)
         with open(config_file, 'r') as f:
             self.cfg: Dict[str, Any] = load_config(config_file)
+
+        cfg_port = self.cfg.get("socket_port", 8765)
+        try:
+            cfg_port = int(cfg_port)
+        except (TypeError, ValueError):
+            cfg_port = 8765
+        host = socket_host or self.cfg.get("socket_host", "127.0.0.1")
+        port = socket_port if socket_port is not None else cfg_port
+        self.socket_server: Optional[PortalServer] = None
+        self._socket_status_interval = max(status_interval, 0.01)
+        self._last_status_sent = 0.0
+        if enable_socket:
+            self.socket_server = PortalServer(host, port)
+            self.socket_server.start()
+            print(f"SOCKET LISTEN {host}:{port}")
+            sys.stdout.flush()
 
         # ─── Window Properties ─────────────────────────────────────────────────────
         # Get the display width and height for both monitors
@@ -499,6 +526,7 @@ class MousePortal(ShowBase):
         self.taskMgr.add(self.update, "updateTask")
         self.command_listener = CommandListener()
         self.fsm = ExperimentFSM(self)
+        self.state_name = "Idle"
         self.fsm.request("Idle")
         if self.dev:
             self.state_text = OnscreenText(text="State: Idle", 
@@ -506,6 +534,7 @@ class MousePortal(ShowBase):
                                            scale=0.07, 
                                            align=TextNode.ALeft)
         self.events = []
+        self._shutdown_requested = False
         self.taskMgr.add(self.process_commands, "commandTask")
 
         
@@ -523,12 +552,15 @@ class MousePortal(ShowBase):
     def userExit(self):
         self.data_logger.close()
         self.event_logger.close()
+        if self.socket_server:
+            self.socket_server.close()
         super().userExit()
 
     def set_key(self, key: str, value: bool) -> None:
         self.key_map[key] = value
         
     def update_state_text(self, state: str):
+        self.state_name = state
         if self.dev and hasattr(self, "state_text"):
             self.state_text.setText(f"State: {state}")
 
@@ -578,39 +610,186 @@ class MousePortal(ShowBase):
         
         # Log movement data (timestamp, position, velocity)
         self.data_logger.log(time.time(), self.camera_position, self.camera_velocity)
+        self._push_status()
         
         print(f"STATUS {time.time()} {self.camera_position:.3f} {self.camera_velocity:.3f}")
         sys.stdout.flush()
         return Task.cont
 
+    def _push_status(self, force: bool = False) -> None:
+        if not self.socket_server or not self.socket_server.is_client_connected():
+            return
+        now = time.time()
+        if force or (now - self._last_status_sent) >= self._socket_status_interval:
+            status = {
+                "type": "status",
+                "time": now,
+                "position": self.camera_position,
+                "velocity": self.camera_velocity,
+                "state": self.state_name,
+            }
+            self.socket_server.send_message(status)
+            self._last_status_sent = now
+
     def process_commands(self, task: Task) -> Task:
-        cmd = self.command_listener.get()
-        if cmd:
-            parts = cmd.split()
-            if parts[0].lower() == 'start_trial':
-                sent = float(parts[1]) if len(parts) > 1 else None
-                self.mark_event('start_trial', sent)
-                self.fsm.request('Running')
-            elif parts[0].lower() == 'stop_trial':
-                sent = float(parts[1]) if len(parts) > 1 else None
-                self.mark_event('stop_trial', sent)
-                self.fsm.request('Idle')
-            elif parts[0].lower() == 'set_texture' and len(parts) >= 3:
-                self.corridor.set_texture(parts[1], parts[2])
-            elif parts[0].lower() == "end":
-                self.userExit()
-                return Task.done
-            elif parts[0].lower() == 'mark_event':
-                name = parts[1] if len(parts) > 1 else 'event'
-                sent = float(parts[2]) if len(parts) > 2 else None
-                self.mark_event(name, sent)
+        while True:
+            cmd = self.command_listener.get()
+            if not cmd:
+                break
+            self._handle_text_command(cmd)
+
+        if self.socket_server:
+            while True:
+                message = self.socket_server.get_message()
+                if not message:
+                    break
+                self._handle_socket_message(message)
+
+        if self._shutdown_requested:
+            self._shutdown_requested = False
+            self.userExit()
+            return Task.done
+
         return Task.cont
+
+    def _handle_text_command(self, cmd: str) -> None:
+        parts = cmd.split()
+        if not parts:
+            return
+        name = parts[0].lower()
+        payload: Dict[str, Any] = {}
+        sent_time: Optional[float] = None
+
+        if name in {"start_trial", "stop_trial"} and len(parts) > 1:
+            try:
+                sent_time = float(parts[1])
+            except ValueError:
+                sent_time = None
+        elif name == "set_texture" and len(parts) >= 3:
+            payload["face"] = parts[1]
+            payload["texture"] = parts[2]
+        elif name == "mark_event":
+            if len(parts) > 1:
+                payload["name"] = parts[1]
+            if len(parts) > 2:
+                try:
+                    sent_time = float(parts[2])
+                except ValueError:
+                    sent_time = None
+
+        self._execute_command(name, sent_time, payload, source="stdin")
+
+    def _handle_socket_message(self, message: Dict[str, Any]) -> None:
+        msg_type = message.get("type")
+        if msg_type == "error":
+            print(f"SOCKET ERROR {message.get('message')} raw={message.get('raw')}")
+            sys.stdout.flush()
+            return
+        if msg_type == "ping":
+            if self.socket_server:
+                reply = {"type": "pong"}
+                if "client_time" in message:
+                    reply["client_time"] = message["client_time"]
+                if "request_id" in message:
+                    reply["request_id"] = message["request_id"]
+                self.socket_server.send_message(reply)
+            return
+
+        command = message.get("command") or msg_type
+        if not command:
+            return
+
+        sent_time: Optional[float] = None
+        for key in ("sent_time", "client_time", "timestamp"):
+            value = message.get(key)
+            if isinstance(value, (int, float)):
+                sent_time = float(value)
+                break
+
+        try:
+            success, info = self._execute_command(command, sent_time, message, source="socket")
+        except Exception as exc:  # pragma: no cover - defensive
+            success = False
+            info = {"error": f"exception:{exc}"}
+            print(f"SOCKET COMMAND ERROR {command}: {exc}")
+            sys.stdout.flush()
+
+        status = "ok" if success else "error"
+        if self.socket_server:
+            ack_payload: Dict[str, Any] = {"type": "ack", "command": command, "status": status}
+            if sent_time is not None:
+                ack_payload["sent_time"] = sent_time
+            for key in ("request_id", "message_id", "id", "correlation_id"):
+                if key in message:
+                    ack_payload[key] = message[key]
+            ack_payload.update(info)
+            self.socket_server.send_message(ack_payload)
+
+    def _execute_command(
+        self,
+        command: str,
+        sent_time: Optional[float] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        *,
+        source: str = "stdin",
+    ) -> tuple[bool, Dict[str, Any]]:
+        payload = payload or {}
+        cmd = command.lower()
+
+        if cmd == "start_trial":
+            self.mark_event("start_trial", sent_time)
+            self.fsm.request("Running")
+            self._push_status(force=True)
+            return True, {"state": self.state_name}
+
+        if cmd == "stop_trial":
+            self.mark_event("stop_trial", sent_time)
+            self.fsm.request("Idle")
+            self._push_status(force=True)
+            return True, {"state": self.state_name}
+
+        if cmd == "set_texture":
+            face = payload.get("face") or payload.get("surface")
+            texture = payload.get("texture") or payload.get("path")
+            if not face or not texture:
+                return False, {"error": "missing_face_or_texture"}
+            self.corridor.set_texture(face, texture)
+            return True, {"face": face, "texture": texture}
+
+        if cmd == "mark_event":
+            name = payload.get("name") or payload.get("event") or "event"
+            self.mark_event(name, sent_time)
+            return True, {"event": name}
+
+        if cmd in {"end", "shutdown", "quit", "exit"}:
+            self._shutdown_requested = True
+            return True, {"state": self.state_name}
+
+        if cmd == "get_status":
+            self._push_status(force=True)
+            return True, {"state": self.state_name}
+
+        if cmd == "ping" and source == "socket":
+            if self.socket_server:
+                self.socket_server.send_message({"type": "pong"})
+            return True, {}
+
+        return False, {"error": f"unknown_command:{cmd}"}
 
     def mark_event(self, name: str, sent_time: float | None = None):
         recv = time.time()
         delta = recv - sent_time if sent_time is not None else None
         self.events.append({'name': name, 'time_sent': sent_time, 'time_received': recv, 'position': self.camera_position, 'delta': delta})
         self.event_logger.log(sent_time, recv, self.camera_position, name)
+        if self.socket_server and self.socket_server.is_client_connected():
+            self.socket_server.send_message({
+                "type": "event",
+                "name": name,
+                "time_sent": sent_time,
+                "time_received": recv,
+                "delta": delta,
+                "position": self.camera_position,
+            })
         print(f'EVENT {name} {recv} {self.camera_position} {delta}')
         sys.stdout.flush()
 
@@ -620,6 +799,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg", default="cfg.json")
     parser.add_argument("--dev", action="store_true", help="Run without hardware")
+    parser.add_argument("--socket-host", default="127.0.0.1", help="Host interface for the control socket")
+    parser.add_argument("--socket-port", type=int, default=8765, help="TCP port for the control socket")
+    parser.add_argument("--no-socket", action="store_true", help="Disable the control socket server")
+    parser.add_argument("--status-interval", type=float, default=0.1, help="Seconds between status messages")
     args = parser.parse_args()
-    app = MousePortal(args.cfg, dev=True)
+    app = MousePortal(
+        args.cfg,
+        dev=args.dev,
+        socket_host=args.socket_host,
+        socket_port=args.socket_port,
+        enable_socket=not args.no_socket,
+        status_interval=args.status_interval,
+    )
     app.run()

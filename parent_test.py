@@ -8,12 +8,143 @@ from PyQt6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
 )
-from PyQt6.QtCore import QProcess, Qt
+from PyQt6.QtCore import QProcess, Qt, QTimer
 import sys
 import time
 import json
 import ast
 import os
+import socket
+import threading
+import queue
+from typing import Optional, Dict, Any
+
+
+class PortalClient:
+    """Simple background connector for the portal control socket."""
+
+    def __init__(self, host: str, port: int) -> None:
+        self.host = host
+        self.port = port
+        self._incoming: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+        self._outgoing: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._connected = threading.Event()
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, name="PortalSocketClient", daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._connected.clear()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+        self._thread = None
+
+    def send(self, payload: Dict[str, Any]) -> None:
+        message = dict(payload)
+        message.setdefault("client_time", time.time())
+        self._outgoing.put(message)
+
+    def get_message(self) -> Optional[Dict[str, Any]]:
+        try:
+            return self._incoming.get_nowait()
+        except queue.Empty:
+            return None
+
+    def is_connected(self) -> bool:
+        return self._connected.is_set()
+
+    # Internal helpers --------------------------------------------------------------
+
+    def _run(self) -> None:
+        sock: Optional[socket.socket] = None
+        buffer = ""
+
+        while not self._stop.is_set():
+            if sock is None:
+                try:
+                    sock = socket.create_connection((self.host, self.port), timeout=1.0)
+                    sock.setblocking(False)
+                    self._connected.set()
+                    self._incoming.put({"type": "client_status", "status": "connected", "time": time.time()})
+                except OSError as exc:
+                    self._connected.clear()
+                    self._incoming.put({"type": "client_status", "status": "connecting", "error": str(exc), "time": time.time()})
+                    if self._stop.wait(0.5):
+                        break
+                    continue
+
+            if sock is None:
+                continue
+
+            try:
+                self._flush_outgoing(sock)
+            except OSError as exc:
+                self._incoming.put({"type": "client_error", "error": f"send:{exc}"})
+                sock = self._drop_socket(sock)
+                continue
+
+            try:
+                chunk = sock.recv(4096)
+            except BlockingIOError:
+                chunk = None
+            except OSError as exc:
+                self._incoming.put({"type": "client_error", "error": f"recv:{exc}"})
+                sock = self._drop_socket(sock)
+                continue
+
+            if chunk == b"":
+                sock = self._drop_socket(sock)
+                continue
+
+            if chunk:
+                buffer += chunk.decode("utf-8", errors="ignore")
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        message = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        self._incoming.put({"type": "client_error", "error": f"json:{exc}", "raw": line})
+                        continue
+                    self._incoming.put(message)
+
+            if chunk is None:
+                self._stop.wait(0.05)
+
+        if sock is not None:
+            self._drop_socket(sock)
+
+    def _flush_outgoing(self, sock: socket.socket) -> None:
+        while True:
+            try:
+                message = self._outgoing.get_nowait()
+            except queue.Empty:
+                break
+            data = (json.dumps(message) + "\n").encode("utf-8")
+            try:
+                sock.sendall(data)
+            except OSError:
+                self._outgoing.put(message)
+                raise
+
+    def _drop_socket(self, sock: socket.socket) -> Optional[socket.socket]:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        sock.close()
+        self._connected.clear()
+        self._incoming.put({"type": "client_status", "status": "disconnected", "time": time.time()})
+        return None
 
 class PortalGUI(QMainWindow):
     def __init__(self):
@@ -49,15 +180,27 @@ class PortalGUI(QMainWindow):
 
         self.launch_btn.clicked.connect(self.launch_process)
         self.end_btn.clicked.connect(self.end_process)
-        self.start_btn.clicked.connect(lambda: self.send_cmd("start_trial"))
-        self.stop_btn.clicked.connect(lambda: self.send_cmd("stop_trial"))
-        self.event_btn.clicked.connect(lambda: self.send_cmd("mark_event button"))
+        self.start_btn.clicked.connect(lambda: self.send_command("start_trial"))
+        self.stop_btn.clicked.connect(lambda: self.send_command("stop_trial"))
+        self.event_btn.clicked.connect(self.mark_event)
 
         self.setCentralWidget(central)
+        self.status_bar = self.statusBar()
+        if self.status_bar:
+            self.status_bar.showMessage("Socket: disconnected")
+
+        self.socket_client: Optional[PortalClient] = None
+        self.socket_timer = QTimer(self)
+        self.socket_timer.setInterval(50)
+        self.socket_timer.timeout.connect(self.poll_socket)
+        self.request_counter = 0
+        self.last_status: Optional[Dict[str, Any]] = None
 
     def load_cfg(self):
         with open(self.cfg_path, "r") as f:
             self.cfg = json.load(f)
+        self.cfg.setdefault("socket_host", "127.0.0.1")
+        self.cfg.setdefault("socket_port", 8765)
         self.table.setRowCount(len(self.cfg))
         self.table.setColumnCount(2)
         self.table.setHorizontalHeaderLabels(["Parameter", "Value"])
@@ -67,11 +210,15 @@ class PortalGUI(QMainWindow):
             self.table.setItem(row, 0, item_key)
             self.table.setItem(row, 1, QTableWidgetItem(str(val)))
 
-    def gather_cfg(self):
-        cfg = {}
+    def gather_cfg(self) -> Dict[str, Any]:
+        cfg: Dict[str, Any] = {}
         for row in range(self.table.rowCount()):
-            key = self.table.item(row, 0).text()
-            val_text = self.table.item(row, 1).text()
+            key_item = self.table.item(row, 0)
+            if key_item is None:
+                continue
+            key = key_item.text()
+            value_item = self.table.item(row, 1)
+            val_text = value_item.text() if value_item else ""
             try:
                 val = ast.literal_eval(val_text)
             except Exception:
@@ -82,23 +229,127 @@ class PortalGUI(QMainWindow):
     def launch_process(self):
         if self.process.state() == QProcess.ProcessState.NotRunning:
             cfg = self.gather_cfg()
+            self.cfg = cfg
             with open(self.runtime_path, "w") as f:
                 json.dump(cfg, f, indent=2)
             self.process.start(sys.executable, ["runportal.py", "--dev", "--cfg", self.runtime_path])
+            host = str(cfg.get("socket_host", "127.0.0.1"))
+            port = cfg.get("socket_port", 8765)
+            try:
+                port = int(port)
+            except (TypeError, ValueError):
+                port = 8765
+            self._launch_socket_client(host, port)
+            if self.status_bar:
+                self.status_bar.showMessage(f"Socket: connecting {host}:{port}")
+
+    def _launch_socket_client(self, host: str, port: int) -> None:
+        self._close_socket_client()
+        self.socket_client = PortalClient(host, port)
+        self.socket_client.start()
+        if not self.socket_timer.isActive():
+            self.socket_timer.start()
+        self._append_output(f"[socket] connecting to {host}:{port}")
+
+    def _close_socket_client(self) -> None:
+        if self.socket_client:
+            self.socket_client.close()
+            self.socket_client = None
+        if self.socket_timer.isActive():
+            self.socket_timer.stop()
+        if self.status_bar:
+            self.status_bar.showMessage("Socket: disconnected")
 
     def end_process(self):
         if self.process.state() == QProcess.ProcessState.Running:
-            self.send_cmd("end")
+            self.send_command("shutdown")
             self.process.waitForFinished(3000)
             if os.path.isfile(self.runtime_path):
                 os.remove(self.runtime_path)
+        self._close_socket_client()
 
-    def send_cmd(self, cmd: str) -> None:
-        if self.process.state() == QProcess.ProcessState.Running:
-            self.process.write((cmd + f" {time.time()}\n").encode())
+    def _next_request_id(self) -> str:
+        self.request_counter += 1
+        return f"req-{self.request_counter:05d}"
+
+    def send_command(self, command: str, **payload: Any) -> None:
+        message: Dict[str, Any] = {"command": command, "request_id": self._next_request_id()}
+        message.update(payload)
+        if self.socket_client:
+            self.socket_client.send(message)
+            self._append_output(f"[command] {command} -> socket")
+        elif self.process.state() == QProcess.ProcessState.Running:
+            self._append_output(f"[command] {command} -> stdin (fallback)")
+            self.process.write((command + f" {time.time()}\n").encode())
+        else:
+            self._append_output(f"[command] {command} (portal not running)")
+
+    def mark_event(self) -> None:
+        self.send_command("mark_event", name="button")
+
+    def poll_socket(self) -> None:
+        if not self.socket_client:
+            return
+        while True:
+            message = self.socket_client.get_message()
+            if not message:
+                break
+            self.handle_socket_message(message)
+
+    def handle_socket_message(self, message: Dict[str, Any]) -> None:
+        msg_type = message.get("type")
+        if msg_type == "client_status":
+            status = message.get("status", "")
+            detail = message.get("error")
+            if self.status_bar:
+                self.status_bar.showMessage(f"Socket: {status}")
+            if detail and status != "connecting":
+                self._append_output(f"[socket] {status}: {detail}")
+            return
+        if msg_type == "client_error":
+            self._append_output(f"[socket-error] {message.get('error')}")
+            return
+        if msg_type == "status":
+            self.last_status = message
+            if self.status_bar:
+                state = message.get("state", "?")
+                position = message.get("position", 0.0)
+                velocity = message.get("velocity", 0.0)
+                self.status_bar.showMessage(f"State: {state} Pos: {position:.2f} Vel: {velocity:.2f}")
+            return
+        if msg_type == "event":
+            name = message.get("name")
+            position = message.get("position")
+            delta = message.get("delta")
+            self._append_output(f"[event] {name} pos={position} delta={delta}")
+            return
+        if msg_type == "ack":
+            self._append_output(
+                f"[ack] {message.get('command')} status={message.get('status')} latency={self._ack_latency(message):.3f}s"
+            )
+            return
+        if msg_type == "connected":
+            self._append_output("[socket] server acknowledged connection")
+            return
+        self._append_output(f"[socket] {json.dumps(message)}")
+
+    def _append_output(self, text: str) -> None:
+        self.output.append(text)
+        print(text)
+
+    def _ack_latency(self, message: Dict[str, Any]) -> float:
+        sent = message.get("sent_time")
+        server_time = message.get("server_time")
+        if isinstance(sent, (int, float)) and isinstance(server_time, (int, float)):
+            return max(server_time - float(sent), 0.0)
+        client_time = message.get("client_time")
+        if isinstance(client_time, (int, float)) and isinstance(server_time, (int, float)):
+            return max(server_time - float(client_time), 0.0)
+        return 0.0
 
     def read_output(self) -> None:
-        data = bytes(self.process.readAllStandardOutput()).decode()
+        raw = self.process.readAllStandardOutput()
+        data = raw.data().decode("utf-8", errors="ignore")
         if data:
             self.output.append(data.rstrip())
 
@@ -106,6 +357,7 @@ class PortalGUI(QMainWindow):
         if self.process.state() == QProcess.ProcessState.Running:
             self.process.terminate()
             self.process.waitForFinished(3000)
+        self._close_socket_client()
         if os.path.isfile(self.runtime_path):
             os.remove(self.runtime_path)
         super().closeEvent(event)
