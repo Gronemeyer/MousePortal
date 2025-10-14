@@ -30,7 +30,7 @@ import time
 import serial
 import threading
 import queue
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 from dataclasses import dataclass
 
 from direct.showbase.ShowBase import ShowBase
@@ -127,6 +127,119 @@ class EventLogger:
 
     def close(self) -> None:
         self.file.close()
+
+
+@dataclass
+class OpenLoopSegment:
+    """Single stage within an open-loop trial."""
+
+    duration: float
+    gain: float = 0.0
+    bias: float = 0.0
+    label: Optional[str] = None
+
+
+class TrialController:
+    """Abstract base for runtime control of corridor velocity."""
+
+    mode: str = "idle"
+
+    def start(self) -> None:
+        """Prepare controller state before a trial begins."""
+
+    def stop(self) -> None:
+        """Cleanup when the trial ends."""
+
+    def compute_velocity(self, input_speed: float, dt: float) -> float:
+        raise NotImplementedError
+
+    def info(self) -> Dict[str, Any]:
+        return {"mode": self.mode}
+
+
+class ClosedLoopTrial(TrialController):
+    """Directly map treadmill velocity to camera velocity."""
+
+    mode = "closed_loop"
+
+    def compute_velocity(self, input_speed: float, dt: float) -> float:  # noqa: ARG002
+        return input_speed
+
+
+class OpenLoopTrial(TrialController):
+    """Cycle through a scripted set of gain/bias glitches."""
+
+    mode = "open_loop"
+
+    def __init__(self, schedule: List[OpenLoopSegment], loop: bool = True) -> None:
+        self.schedule = schedule
+        self.loop = loop
+        self.active = False
+        self._index = 0
+        self._time_left = 0.0
+        self._current: Optional[OpenLoopSegment] = None
+
+    def start(self) -> None:
+        self.active = True
+        self._index = 0
+        self._current = self.schedule[0] if self.schedule else None
+        self._time_left = self._current.duration if self._current else 0.0
+
+    def stop(self) -> None:
+        self.active = False
+
+    def compute_velocity(self, input_speed: float, dt: float) -> float:
+        if not self.schedule:
+            return 0.0
+        if not self._current or not self.active:
+            self.start()
+        self._advance(dt)
+        current = self._current or self.schedule[0]
+        return current.gain * input_speed + current.bias
+
+    def _advance(self, dt: float) -> None:
+        if not self._current:
+            return
+        self._time_left -= dt
+        while self._time_left <= 0.0 and self.schedule:
+            next_index = self._index + 1
+            if next_index >= len(self.schedule):
+                if self.loop:
+                    next_index = 0
+                else:
+                    next_index = len(self.schedule) - 1
+            self._index = next_index
+            self._current = self.schedule[self._index]
+            self._time_left += max(self._current.duration, 1e-6)
+
+    def info(self) -> Dict[str, Any]:
+        segment = self._current
+        if not segment and self.schedule:
+            segment = self.schedule[self._index]
+        info: Dict[str, Any] = {
+            "mode": self.mode,
+            "active": self.active,
+            "loop": self.loop,
+            "segment_count": len(self.schedule),
+        }
+        if segment:
+            info.update({
+                "segment_index": self._index,
+                "segment_label": segment.label,
+                "gain": segment.gain,
+                "bias": segment.bias,
+                "remaining": max(self._time_left, 0.0),
+            })
+        return info
+
+
+DEFAULT_OPEN_LOOP_PATTERN = [
+    {"duration": 1.5, "gain": 1.0, "bias": 0.0, "label": "follow"},
+    {"duration": 0.6, "gain": 0.0, "bias": 3.5, "label": "glitch_forward"},
+    {"duration": 0.5, "gain": 0.0, "bias": 0.0, "label": "freeze"},
+    {"duration": 0.7, "gain": -0.3, "bias": 0.0, "label": "reverse"},
+    {"duration": 1.2, "gain": 0.5, "bias": 0.0, "label": "half_gain"},
+]
 @dataclass
 class EncoderData:
     """ Represents a single encoder reading."""
@@ -448,6 +561,17 @@ class MousePortal(ShowBase):
         with open(config_file, 'r') as f:
             self.cfg: Dict[str, Any] = load_config(config_file)
 
+        self.default_trial_type = str(self.cfg.get("default_trial_type", "closed_loop")).lower()
+        if self.default_trial_type not in {"open_loop", "closed_loop"}:
+            self.default_trial_type = "closed_loop"
+        self.open_loop_schedule = self._load_open_loop_schedule(self.cfg)
+        self.open_loop_repeat = bool(self.cfg.get("open_loop_repeat", True))
+        self.closed_loop_controller = ClosedLoopTrial()
+        self.controller: TrialController = self.closed_loop_controller
+        self.trial_mode: str = "idle"
+        self.trial_started_at: Optional[float] = None
+        self.current_input_speed: float = 0.0
+
         cfg_port = self.cfg.get("socket_port", 8765)
         try:
             cfg_port = int(cfg_port)
@@ -472,7 +596,7 @@ class MousePortal(ShowBase):
 
         # Set window properties to span across both monitors
         wp: WindowProperties = WindowProperties()
-        wp.setSize(1920 * 2, 1280)  # Double the width for two
+        wp.setSize(1920, 1280)  # Double the width for two
         wp.set_origin(display_width, 0)
         self.dev = dev
         self.win.requestProperties(wp)
@@ -549,6 +673,174 @@ class MousePortal(ShowBase):
             self.messenger.toggleVerbose()
             self.accept("v", self.messenger.toggle_verbose)
 
+    def _default_open_loop_schedule(self) -> List[OpenLoopSegment]:
+        return [
+            OpenLoopSegment(
+                duration=float(entry.get("duration", 1.0)),
+                gain=float(entry.get("gain", 0.0)),
+                bias=float(entry.get("bias", 0.0)),
+                label=entry.get("label"),
+            )
+            for entry in DEFAULT_OPEN_LOOP_PATTERN
+        ]
+
+    def _load_open_loop_schedule(self, cfg: Dict[str, Any]) -> List[OpenLoopSegment]:
+        schedule_cfg = cfg.get("open_loop_schedule")
+        if not schedule_cfg:
+            return self._default_open_loop_schedule()
+        schedule: List[OpenLoopSegment] = []
+        for entry in schedule_cfg:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                duration = float(entry.get("duration", 0))
+            except (TypeError, ValueError):
+                continue
+            if duration <= 0:
+                continue
+            gain_value = entry.get("gain")
+            bias_value = entry.get("bias", entry.get("offset", 0.0))
+            if "velocity" in entry:
+                bias_value = entry.get("velocity", bias_value)
+                gain_value = entry.get("gain", 0.0)
+            base_gain = 0.0 if "velocity" in entry else 1.0
+            try:
+                gain = float(gain_value) if gain_value is not None else base_gain
+            except (TypeError, ValueError):
+                gain = base_gain
+            try:
+                bias = float(bias_value) if bias_value is not None else 0.0
+            except (TypeError, ValueError):
+                bias = 0.0
+            schedule.append(OpenLoopSegment(duration=duration, gain=gain, bias=bias, label=entry.get("label")))
+        if not schedule:
+            return self._default_open_loop_schedule()
+        return schedule
+
+    def _parse_open_loop_segments(self, raw_segments: Any) -> List[OpenLoopSegment]:
+        if not isinstance(raw_segments, list):
+            return []
+        segments: List[OpenLoopSegment] = []
+        last_gain = 1.0
+        last_bias = 0.0
+        for entry in raw_segments:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                duration = float(entry.get("duration", 0))
+            except (TypeError, ValueError):
+                continue
+            if duration <= 0:
+                continue
+            raw_gain = entry.get("gain")
+            raw_bias = entry.get("bias", entry.get("offset"))
+            if "velocity" in entry and entry["velocity"] is not None:
+                raw_bias = entry["velocity"]
+                raw_gain = entry.get("gain", 0.0)
+            if raw_gain is None:
+                gain = last_gain if segments else 1.0
+            else:
+                try:
+                    gain = float(raw_gain)
+                except (TypeError, ValueError):
+                    gain = last_gain if segments else 1.0
+            if raw_bias is None:
+                bias = last_bias if segments else 0.0
+            else:
+                try:
+                    bias = float(raw_bias)
+                except (TypeError, ValueError):
+                    bias = last_bias if segments else 0.0
+            segments.append(OpenLoopSegment(duration=duration, gain=gain, bias=bias, label=entry.get("label")))
+            last_gain = gain
+            last_bias = bias
+        return segments
+
+    def _coerce_bool(self, value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off"}:
+                return False
+        return default
+
+    def _create_open_loop_controller(
+        self,
+        schedule: Optional[List[OpenLoopSegment]] = None,
+        *,
+        loop: Optional[bool] = None,
+    ) -> OpenLoopTrial:
+        source = schedule if schedule else self.open_loop_schedule
+        if not source:
+            source = self._default_open_loop_schedule()
+        controller_schedule = [
+            OpenLoopSegment(duration=segment.duration, gain=segment.gain, bias=segment.bias, label=segment.label)
+            for segment in source
+        ]
+        loop_flag = self.open_loop_repeat if loop is None else loop
+        return OpenLoopTrial(controller_schedule, loop=loop_flag)
+
+    def _start_trial(self, trial_type: str, sent_time: Optional[float], payload: Dict[str, Any]) -> Dict[str, Any]:
+        requested = (trial_type or "closed_loop").lower()
+        if requested == "open_loop":
+            segments_payload = payload.get("segments") or payload.get("schedule")
+            schedule_override: Optional[List[OpenLoopSegment]] = None
+            if segments_payload is not None:
+                parsed = self._parse_open_loop_segments(segments_payload)
+                schedule_override = parsed or None
+            loop_value = payload.get("loop")
+            if loop_value is None:
+                loop_value = payload.get("repeat")
+            loop_override: Optional[bool] = None
+            if loop_value is not None:
+                loop_override = self._coerce_bool(loop_value, self.open_loop_repeat)
+            controller = self._create_open_loop_controller(schedule_override, loop=loop_override)
+        else:
+            requested = "closed_loop"
+            controller = self.closed_loop_controller
+
+        if self.controller is not controller:
+            self.controller.stop()
+        self.controller = controller
+        self.controller.start()
+        self.trial_mode = requested
+        self.trial_started_at = time.time()
+
+        event_name = payload.get("event_name") or f"start_{requested}"
+        self.mark_event(event_name, sent_time)
+        self.fsm.request("Running")
+        self._push_status(force=True)
+        info = {
+            "state": self.state_name,
+            "trial_mode": self.trial_mode,
+            "controller": self.controller.info(),
+        }
+        return info
+
+    def _stop_trial(self, sent_time: Optional[float]) -> Dict[str, Any]:
+        if self.trial_mode != "idle":
+            self.mark_event(f"stop_{self.trial_mode}", sent_time)
+        self.controller.stop()
+        self.controller = self.closed_loop_controller
+        self.controller.start()
+        self.trial_mode = "idle"
+        self.trial_started_at = None
+        self.fsm.request("Idle")
+        self._push_status(force=True)
+        info = {
+            "state": self.state_name,
+            "trial_mode": self.trial_mode,
+            "controller": self.controller.info(),
+        }
+        return info
+
     def userExit(self):
         self.data_logger.close()
         self.event_logger.close()
@@ -576,20 +868,21 @@ class MousePortal(ShowBase):
             Task: Continuation signal for the task manager.
         """
         dt: float = globalClock.getDt()
-        move_distance: float = 0.0
-        
+
         if self.dev:
             if self.key_map["forward"]:
-                self.camera_velocity = self.speed_scaling
+                input_speed = self.speed_scaling
             elif self.key_map["backward"]:
-                self.camera_velocity = -self.speed_scaling
+                input_speed = -self.speed_scaling
             else:
-                self.camera_velocity = 0.0
+                input_speed = 0.0
         else:
-            self.camera_velocity = self.treadmill.data.speed
-        # Update camera position (movement along the Y axis)
-        self.camera_position += self.camera_velocity * dt
-        move_distance = self.camera_velocity * dt
+            input_speed = self.treadmill.data.speed
+
+        self.current_input_speed = input_speed
+        self.camera_velocity = self.controller.compute_velocity(input_speed, dt)
+        move_distance: float = self.camera_velocity * dt
+        self.camera_position += move_distance
         self.camera.setPos(0, self.camera_position, self.camera_height)
         
         # Recycle corridor segments when the camera moves beyond one segment length
@@ -627,7 +920,12 @@ class MousePortal(ShowBase):
                 "position": self.camera_position,
                 "velocity": self.camera_velocity,
                 "state": self.state_name,
+                "trial_mode": self.trial_mode,
+                "input_velocity": self.current_input_speed,
+                "controller": self.controller.info(),
             }
+            if self.trial_started_at is not None:
+                status["trial_elapsed"] = now - self.trial_started_at
             self.socket_server.send_message(status)
             self._last_status_sent = now
 
@@ -661,10 +959,17 @@ class MousePortal(ShowBase):
         sent_time: Optional[float] = None
 
         if name in {"start_trial", "stop_trial"} and len(parts) > 1:
-            try:
-                sent_time = float(parts[1])
-            except ValueError:
-                sent_time = None
+            for token in parts[1:]:
+                token_lower = token.lower()
+                try:
+                    sent_time = float(token)
+                    continue
+                except ValueError:
+                    pass
+                if name == "start_trial" and token_lower in {"open_loop", "closed_loop"}:
+                    payload["trial_type"] = token_lower
+                elif name == "start_trial" and "event_name" not in payload:
+                    payload["event_name"] = f"start_{token_lower}"
         elif name == "set_texture" and len(parts) >= 3:
             payload["face"] = parts[1]
             payload["texture"] = parts[2]
@@ -737,16 +1042,21 @@ class MousePortal(ShowBase):
         cmd = command.lower()
 
         if cmd == "start_trial":
-            self.mark_event("start_trial", sent_time)
-            self.fsm.request("Running")
-            self._push_status(force=True)
-            return True, {"state": self.state_name}
+            trial_type = payload.get("trial_type") or payload.get("mode") or self.default_trial_type
+            info = self._start_trial(trial_type, sent_time, payload)
+            return True, info
 
         if cmd == "stop_trial":
-            self.mark_event("stop_trial", sent_time)
-            self.fsm.request("Idle")
-            self._push_status(force=True)
-            return True, {"state": self.state_name}
+            info = self._stop_trial(sent_time)
+            return True, info
+
+        if cmd == "start_open_loop":
+            info = self._start_trial("open_loop", sent_time, payload)
+            return True, info
+
+        if cmd == "start_closed_loop":
+            info = self._start_trial("closed_loop", sent_time, payload)
+            return True, info
 
         if cmd == "set_texture":
             face = payload.get("face") or payload.get("surface")
@@ -754,12 +1064,12 @@ class MousePortal(ShowBase):
             if not face or not texture:
                 return False, {"error": "missing_face_or_texture"}
             self.corridor.set_texture(face, texture)
-            return True, {"face": face, "texture": texture}
+            return True, {"face": face, "texture": texture, "trial_mode": self.trial_mode}
 
         if cmd == "mark_event":
             name = payload.get("name") or payload.get("event") or "event"
             self.mark_event(name, sent_time)
-            return True, {"event": name}
+            return True, {"event": name, "trial_mode": self.trial_mode, "controller": self.controller.info()}
 
         if cmd in {"end", "shutdown", "quit", "exit"}:
             self._shutdown_requested = True
@@ -767,7 +1077,7 @@ class MousePortal(ShowBase):
 
         if cmd == "get_status":
             self._push_status(force=True)
-            return True, {"state": self.state_name}
+            return True, {"state": self.state_name, "trial_mode": self.trial_mode, "controller": self.controller.info()}
 
         if cmd == "ping" and source == "socket":
             if self.socket_server:
@@ -789,6 +1099,8 @@ class MousePortal(ShowBase):
                 "time_received": recv,
                 "delta": delta,
                 "position": self.camera_position,
+                "trial_mode": self.trial_mode,
+                "controller": self.controller.info(),
             })
         print(f'EVENT {name} {recv} {self.camera_position} {delta}')
         sys.stdout.flush()

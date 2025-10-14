@@ -7,6 +7,9 @@ from PyQt6.QtWidgets import (
     QWidget,
     QTableWidget,
     QTableWidgetItem,
+    QHBoxLayout,
+    QLabel,
+    QComboBox,
 )
 from PyQt6.QtCore import QProcess, Qt, QTimer
 import sys
@@ -172,6 +175,13 @@ class PortalGUI(QMainWindow):
         self.stop_btn = QPushButton("Stop Trial")
         self.event_btn = QPushButton("Mark Event")
 
+        trial_row = QHBoxLayout()
+        trial_row.addWidget(QLabel("Trial Type:"))
+        self.trial_mode_combo = QComboBox()
+        self.trial_mode_combo.addItems(["closed_loop", "open_loop"])
+        trial_row.addWidget(self.trial_mode_combo)
+        layout.addLayout(trial_row)
+
         layout.addWidget(self.launch_btn)
         layout.addWidget(self.end_btn)
         layout.addWidget(self.start_btn)
@@ -180,8 +190,8 @@ class PortalGUI(QMainWindow):
 
         self.launch_btn.clicked.connect(self.launch_process)
         self.end_btn.clicked.connect(self.end_process)
-        self.start_btn.clicked.connect(lambda: self.send_command("start_trial"))
-        self.stop_btn.clicked.connect(lambda: self.send_command("stop_trial"))
+        self.start_btn.clicked.connect(self.start_trial)
+        self.stop_btn.clicked.connect(self.stop_trial)
         self.event_btn.clicked.connect(self.mark_event)
 
         self.setCentralWidget(central)
@@ -243,6 +253,15 @@ class PortalGUI(QMainWindow):
             if self.status_bar:
                 self.status_bar.showMessage(f"Socket: connecting {host}:{port}")
 
+    def start_trial(self) -> None:
+        trial_type = "closed_loop"
+        if hasattr(self, "trial_mode_combo") and self.trial_mode_combo is not None:
+            trial_type = self.trial_mode_combo.currentText()
+        self.send_command("start_trial", trial_type=trial_type, mode=trial_type)
+
+    def stop_trial(self) -> None:
+        self.send_command("stop_trial")
+
     def _launch_socket_client(self, host: str, port: int) -> None:
         self._close_socket_client()
         self.socket_client = PortalClient(host, port)
@@ -280,7 +299,14 @@ class PortalGUI(QMainWindow):
             self._append_output(f"[command] {command} -> socket")
         elif self.process.state() == QProcess.ProcessState.Running:
             self._append_output(f"[command] {command} -> stdin (fallback)")
-            self.process.write((command + f" {time.time()}\n").encode())
+            timestamp = time.time()
+            tokens = [command]
+            if command == "start_trial":
+                trial_type = message.get("trial_type") or message.get("mode")
+                if trial_type:
+                    tokens.append(str(trial_type))
+            tokens.append(str(timestamp))
+            self.process.write((" ".join(tokens) + "\n").encode())
         else:
             self._append_output(f"[command] {command} (portal not running)")
 
@@ -315,18 +341,89 @@ class PortalGUI(QMainWindow):
                 state = message.get("state", "?")
                 position = message.get("position", 0.0)
                 velocity = message.get("velocity", 0.0)
-                self.status_bar.showMessage(f"State: {state} Pos: {position:.2f} Vel: {velocity:.2f}")
+                trial_mode = message.get("trial_mode", "idle")
+                status_text = f"State: {state} Mode: {trial_mode} Pos: {position:.2f} Vel: {velocity:.2f}"
+                controller = message.get("controller")
+                if isinstance(controller, dict) and controller.get("mode"):
+                    status_text += f" Ctrl: {controller.get('mode')}"
+                    if controller.get("mode") == "open_loop":
+                        segment_label = controller.get("segment_label")
+                        if segment_label is None and controller.get("segment_index") is not None:
+                            segment_label = controller.get("segment_index")
+                        if segment_label is not None:
+                            status_text += f" Seg: {segment_label}"
+                        remaining = controller.get("remaining")
+                        if isinstance(remaining, (int, float)):
+                            status_text += f" Rem: {remaining:.1f}s"
+                        segment_count = controller.get("segment_count")
+                        if isinstance(segment_count, int):
+                            status_text += f" Segments: {segment_count}"
+                        loop_flag = controller.get("loop")
+                        if loop_flag is not None:
+                            status_text += f" Loop: {loop_flag}"
+                elapsed = message.get("trial_elapsed")
+                if isinstance(elapsed, (int, float)):
+                    status_text += f" Elapsed: {elapsed:.1f}s"
+                self.status_bar.showMessage(status_text)
             return
         if msg_type == "event":
             name = message.get("name")
             position = message.get("position")
             delta = message.get("delta")
-            self._append_output(f"[event] {name} pos={position} delta={delta}")
+            trial_mode = message.get("trial_mode")
+            controller = message.get("controller")
+            controller_mode = controller.get("mode") if isinstance(controller, dict) else None
+            label = None
+            if isinstance(controller, dict):
+                label = controller.get("segment_label") or controller.get("segment_index")
+            extra = []
+            if trial_mode:
+                extra.append(f"mode={trial_mode}")
+            if controller_mode and controller_mode != trial_mode:
+                extra.append(f"ctrl={controller_mode}")
+            if label is not None:
+                extra.append(f"segment={label}")
+            if isinstance(controller, dict) and controller.get("mode") == "open_loop":
+                gain = controller.get("gain")
+                bias = controller.get("bias")
+                remaining = controller.get("remaining")
+                if gain is not None:
+                    extra.append(f"gain={gain}")
+                if bias is not None:
+                    extra.append(f"bias={bias}")
+                if isinstance(remaining, (int, float)):
+                    extra.append(f"remaining={remaining:.2f}s")
+            extra_text = f" ({', '.join(extra)})" if extra else ""
+            self._append_output(f"[event] {name}{extra_text} pos={position} delta={delta}")
             return
         if msg_type == "ack":
-            self._append_output(
-                f"[ack] {message.get('command')} status={message.get('status')} latency={self._ack_latency(message):.3f}s"
-            )
+            trial_mode = message.get("trial_mode")
+            controller = message.get("controller")
+            controller_mode = controller.get("mode") if isinstance(controller, dict) else None
+            mode_text = trial_mode or controller_mode
+            text = f"[ack] {message.get('command')} status={message.get('status')} latency={self._ack_latency(message):.3f}s"
+            if mode_text:
+                text += f" mode={mode_text}"
+                if mode_text in {"closed_loop", "open_loop"} and hasattr(self, "trial_mode_combo"):
+                    index = self.trial_mode_combo.findText(mode_text)
+                    if index >= 0:
+                        self.trial_mode_combo.setCurrentIndex(index)
+            if isinstance(controller, dict):
+                segment = controller.get("segment_label")
+                if segment is None and controller.get("segment_index") is not None:
+                    segment = controller.get("segment_index")
+                if segment is not None:
+                    text += f" segment={segment}"
+                remaining = controller.get("remaining")
+                if isinstance(remaining, (int, float)):
+                    text += f" remaining={remaining:.2f}s"
+                segment_count = controller.get("segment_count")
+                if isinstance(segment_count, int):
+                    text += f" segments={segment_count}"
+                loop_flag = controller.get("loop")
+                if loop_flag is not None:
+                    text += f" loop={loop_flag}"
+            self._append_output(text)
             return
         if msg_type == "connected":
             self._append_output("[socket] server acknowledged connection")
