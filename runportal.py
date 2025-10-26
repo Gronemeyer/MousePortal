@@ -30,12 +30,13 @@ import time
 import serial
 import threading
 import queue
+from pathlib import Path
 from typing import Any, Dict, Optional, List
 from dataclasses import dataclass
 
 from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
-from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog, GraphicsPipe
+from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog, GraphicsPipe, Filename
 from direct.showbase import DirectObject
 from direct.fsm.FSM import FSM
 from direct.gui.OnscreenText import OnscreenText
@@ -59,15 +60,7 @@ loadPrcFileData('', 'aux-display tinydisplay')
 loadPrcFileData('', 'window-title MousePortal')
 
 def load_config(config_file: str) -> Dict[str, Any]:
-    """
-    Load configuration parameters from a JSON file.
-    
-    Parameters:
-        config_file (str): Path to the configuration file.
-        
-    Returns:
-        dict: Configuration parameters.
-    """
+    """Load configuration parameters from a JSON file."""
     try:
         with open(config_file, 'r') as f:
             config = json.load(f)
@@ -124,7 +117,6 @@ class EventLogger:
             'event_name': name,
         })
         self.file.flush()
-
     def close(self) -> None:
         self.file.close()
 
@@ -233,6 +225,16 @@ class OpenLoopTrial(TrialController):
         return info
 
 
+@dataclass
+class OpenLoopSegment:
+    """Single stage within an open-loop trial."""
+
+    duration: float
+    gain: float = 0.0
+    bias: float = 0.0
+    label: Optional[str] = None
+
+
 DEFAULT_OPEN_LOOP_PATTERN = [
     {"duration": 1.5, "gain": 1.0, "bias": 0.0, "label": "follow"},
     {"duration": 0.6, "gain": 0.0, "bias": 3.5, "label": "glitch_forward"},
@@ -288,10 +290,15 @@ class ExperimentFSM(FSM):
 
 
 class Corridor:
-    """
-    Class for generating infinite corridor geometric rendering
-    """
-    def __init__(self, base: ShowBase, config: Dict[str, Any]) -> None:
+    """Class for generating infinite corridor geometric rendering."""
+
+    def __init__(
+        self,
+        base: ShowBase,
+        config: Dict[str, Any],
+        *,
+        asset_dir: Optional[Path] = None,
+    ) -> None:
         """
         Initialize the corridor by creating segments for each face.
         
@@ -300,6 +307,7 @@ class Corridor:
             config (dict): Configuration parameters.
         """
         self.base = base
+        self.asset_dir = Path(asset_dir) if asset_dir else None
         self.segment_length: float = config["segment_length"]
         self.corridor_width: float = config["corridor_width"]
         self.wall_height: float = config["wall_height"]
@@ -373,8 +381,20 @@ class Corridor:
             self.apply_texture(floor_node, self.floor_texture)
             self.floor_segments.append(floor_node)
             
+    def _resolve_texture_path(self, texture_path: str) -> Filename:
+        if not texture_path:
+            return Filename()
+        candidate = Path(texture_path)
+        if not candidate.is_absolute():
+            if self.asset_dir:
+                candidate = self.asset_dir / candidate
+            else:
+                candidate = candidate.resolve()
+        return Filename.from_os_specific(str(candidate.resolve()))
+
     def apply_texture(self, node: NodePath, texture_path: str) -> None:
-        texture: Texture = self.base.loader.loadTexture(texture_path)
+        panda_path = self._resolve_texture_path(texture_path)
+        texture: Texture = self.base.loader.loadTexture(panda_path)
         node.setTexture(texture)
         
     def set_texture(self, face: str, texture_path: str) -> None:
@@ -387,7 +407,8 @@ class Corridor:
         segs = lists.get(face.lower())
         if not segs:
             return
-        texture = self.base.loader.loadTexture(texture_path)
+        panda_path = self._resolve_texture_path(texture_path)
+        texture = self.base.loader.loadTexture(panda_path)
         for seg in segs:
             seg.setTexture(texture)
 
@@ -559,7 +580,10 @@ class MousePortal(ShowBase):
         # config: Dict[str, Any] = load_config("conf.json")
         # Load configuration (init option for testing)
         with open(config_file, 'r') as f:
-            self.cfg: Dict[str, Any] = load_config(config_file)
+            self.cfg = load_config(config_file)
+
+        asset_dir_value = self.cfg.get("asset_dir")
+        self.asset_dir = Path(asset_dir_value).expanduser().resolve() if asset_dir_value else None
 
         self.default_trial_type = str(self.cfg.get("default_trial_type", "closed_loop")).lower()
         if self.default_trial_type not in {"open_loop", "closed_loop"}:
@@ -594,13 +618,37 @@ class MousePortal(ShowBase):
         display_width = pipe.getDisplayWidth()
         display_height = pipe.getDisplayHeight()
 
-        # Set window properties to span across both monitors
+        # Set window properties based on configuration
+        window_width = int(self.cfg.get("window_width", display_width))
+        window_height = int(self.cfg.get("window_height", display_height))
+        if window_width <= 0:
+            window_width = display_width
+        if window_height <= 0:
+            window_height = display_height
+
+        origin_x = self.cfg.get("window_origin_x")
+        if origin_x is None:
+            origin_x = display_width
+        origin_y = self.cfg.get("window_origin_y", 0)
+        try:
+            origin_x = int(origin_x)
+        except (TypeError, ValueError):
+            origin_x = display_width
+        try:
+            origin_y = int(origin_y)
+        except (TypeError, ValueError):
+            origin_y = 0
+
         wp: WindowProperties = WindowProperties()
-        wp.setSize(1920, 1280)  # Double the width for two
-        wp.set_origin(display_width, 0)
+        wp.setSize(window_width, window_height)
+        wp.set_origin(origin_x, origin_y)
+
+        if bool(self.cfg.get("fullscreen", False)):
+            wp.setFullscreen(True)
+
         self.dev = dev
         self.win.requestProperties(wp)
-        self.setFrameRateMeter(True)
+        self.setFrameRateMeter(bool(self.cfg.get("show_frame_rate_meter", True)))
         # Disable default mouse-based camera control for mapped input
         self.disableMouse()
         
@@ -628,14 +676,14 @@ class MousePortal(ShowBase):
                                                 messenger=self.messenger)
 
         # ─── Corridor Setup ─────────────────────────────────────────────────────
-        self.corridor: Corridor = Corridor(self, self.cfg)
+        self.corridor = Corridor(self, self.cfg, asset_dir=self.asset_dir)
         self.segment_length: float = self.cfg["segment_length"]
         
         # Variable to track movement since last recycling.
         self.distance_since_recycle: float = 0.0
-        
+
         # Movement speed (units per second).
-        self.movement_speed: float = 10.0
+        self.movement_speed = float(self.cfg.get("movement_speed", 10.0))
         
         # ─── Fog Effect ─────────────────────────────────────────────────────────────
         self.fog_effect = FogEffect(self, 
