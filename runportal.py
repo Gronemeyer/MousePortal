@@ -18,10 +18,10 @@ An infinite corridor/hallway effect is simulated by recycling the front segments
 Configuration parameters are loaded from a JSON file "conf.json".
 
 Author: Jacob Gronemeyer
-Date: 2025-07-28
-Version: 0.3
+Version: 2025.11.11
 """
 
+import copy
 import json
 import sys
 import csv
@@ -31,8 +31,8 @@ import serial
 import threading
 import queue
 from pathlib import Path
-from typing import Any, Dict, Optional, List
-from dataclasses import dataclass
+from typing import Any, Dict, Optional, List, Mapping
+from dataclasses import dataclass, field
 
 from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
@@ -43,6 +43,16 @@ from direct.gui.OnscreenText import OnscreenText
 from panda3d.core import TextNode
 
 from portal_socket import PortalServer
+
+try:  # Support running as ``python -m mesofield.gui.runportal`` and standalone
+    from . import portal_protocol  # type: ignore[import-error]
+except ImportError:  # pragma: no cover - executed when run as a script
+    import portal_protocol  # type: ignore[import-not-found]
+
+try:  # Local planner utilities are optional when running standalone
+    from .experiment_logic import StructuredTrial, build_structured_trials
+except ImportError:  # pragma: no cover - executed when run as a script
+    from experiment_logic import StructuredTrial, build_structured_trials  # type: ignore[import-not-found]
 
 # ─── Fix for running as subprocess ─────────────────────────────────────────────────────
 # https://raw.githubusercontent.com/panda3d/panda3d/release/1.10.x/panda/src/doc/howto.use_config.txt
@@ -143,7 +153,9 @@ class TrialController:
         """Cleanup when the trial ends."""
 
     def compute_velocity(self, input_speed: float, dt: float) -> float:
-        raise NotImplementedError
+        # Safe default passthrough so that accidental use of the base class does not
+        # crash the portal loop. Subclasses override this with specific behaviour.
+        return input_speed
 
     def info(self) -> Dict[str, Any]:
         return {"mode": self.mode}
@@ -176,6 +188,340 @@ class OpenLoopTrial(TrialController):
         self._index = 0
         self._current = self.schedule[0] if self.schedule else None
         self._time_left = self._current.duration if self._current else 0.0
+
+
+def _plan_normalise_mode(value: Optional[str], default: str) -> str:
+    if not value:
+        return default
+    return value.strip().lower() if value.strip().lower() in {"open_loop", "closed_loop"} else default
+
+
+def _plan_coerce_float(value: Any, *, default: Optional[float] = None) -> Optional[float]:
+    if value is None:
+        return default
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    if result <= 0:
+        return default
+    return result
+
+
+def _plan_clone_segments(raw: Any) -> Optional[list[Dict[str, Any]]]:
+    if not isinstance(raw, list):
+        return None
+    cloned: list[Dict[str, Any]] = []
+    for entry in raw:
+        if isinstance(entry, dict):
+            cloned.append(dict(entry))
+    return cloned or None
+
+
+@dataclass
+class TrialDefinition:
+    index: int
+    label: str
+    mode: str
+    duration: Optional[float] = None
+    segments: Optional[list[Dict[str, Any]]] = None
+    parameters: Dict[str, Any] = field(default_factory=dict)
+    source: str = "plan"
+    sequence_index: Optional[int] = None
+
+    def merged(
+        self,
+        *,
+        index: Optional[int] = None,
+        overrides: Optional[Dict[str, Any]] = None,
+        mode_hint: Optional[str] = None,
+        source: Optional[str] = None,
+        default_mode: str,
+    ) -> "TrialDefinition":
+        payload: Dict[str, Any] = {}
+        if overrides:
+            payload.update(overrides)
+        if "trial" in payload and isinstance(payload["trial"], dict):
+            nested = dict(payload.pop("trial"))
+            nested.update(payload)
+            payload = nested
+
+        mode = _plan_normalise_mode(
+            payload.get("mode") or payload.get("trial_type") or mode_hint or self.mode,
+            default_mode,
+        )
+        label = payload.get("label") or payload.get("event_name") or self.label
+        if not isinstance(label, str) or not label.strip():
+            label = f"trial_{index or self.index}"
+        duration = _plan_coerce_float(payload.get("duration"), default=self.duration)
+        seg_override = payload.get("segments") or payload.get("schedule")
+        segments = _plan_clone_segments(seg_override) if seg_override is not None else None
+        if segments is None:
+            segments = _plan_clone_segments(self.segments)
+        parameters: Dict[str, Any] = dict(self.parameters or {})
+        param_override = payload.get("parameters")
+        if isinstance(param_override, dict):
+            parameters.update(param_override)
+        for key, value in payload.items():
+            if key in {
+                "mode",
+                "trial_type",
+                "duration",
+                "segments",
+                "schedule",
+                "parameters",
+                "label",
+                "event_name",
+                "trial",
+            }:
+                continue
+            parameters.setdefault(key, value)
+        return TrialDefinition(
+            index=index if index is not None else self.index,
+            label=label,
+            mode=mode,
+            duration=duration,
+            segments=segments,
+            parameters=parameters,
+            source=source or self.source,
+            sequence_index=self.sequence_index,
+        )
+
+    def to_payload(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "mode": self.mode,
+            "trial_type": self.mode,
+            "event_name": f"trial_start:{self.label}",
+            "trial_label": self.label,
+            "trial_index": self.index,
+            "trial_source": self.source,
+        }
+        if self.sequence_index is not None:
+            payload["trial_sequence_index"] = self.sequence_index
+        if self.duration is not None:
+            payload["duration"] = self.duration
+        if self.segments is not None:
+            payload["segments"] = _plan_clone_segments(self.segments)
+        if self.parameters:
+            payload["parameters"] = dict(self.parameters)
+        return payload
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "index": self.index,
+            "label": self.label,
+            "mode": self.mode,
+            "duration": self.duration,
+            "parameters": dict(self.parameters or {}),
+            "source": self.source,
+            "sequence_index": self.sequence_index,
+        }
+
+
+def _plan_from_structured_definition(cfg: Dict[str, Any], default_mode: str) -> List[TrialDefinition]:
+    """Convert the new block/trial/routine format into :class:`TrialDefinition` objects."""
+
+    if build_structured_trials is None:
+        return []
+    if not isinstance(cfg, dict) or "blocks" not in cfg:
+        return []
+
+    try:
+        structured_trials, metadata = build_structured_trials(cfg)
+    except Exception:
+        return []
+
+    if not structured_trials:
+        return []
+
+    required_keys = metadata.get("required_keys")
+    timing_cfg = metadata.get("timing") if isinstance(metadata.get("timing"), dict) else {}
+    schema_version = metadata.get("schema_version")
+    rng_seed = metadata.get("rng_seed")
+
+    trials: List[TrialDefinition] = []
+    for entry in structured_trials:
+        parameters: Dict[str, Any] = {
+            "plan_source": "structured_blocks",
+        }
+        if entry.block_name:
+            parameters["block_name"] = entry.block_name
+        if entry.routines:
+            parameters["routines"] = copy.deepcopy(entry.routines)
+        parameters["structured_definition"] = copy.deepcopy(entry.definition)
+        if required_keys:
+            parameters["required_keys"] = list(required_keys)
+        if timing_cfg:
+            parameters["timing"] = dict(timing_cfg)
+        if schema_version is not None:
+            parameters["plan_schema_version"] = schema_version
+        if rng_seed is not None:
+            parameters["plan_rng_seed"] = rng_seed
+
+        clean_parameters = {
+            key: value
+            for key, value in parameters.items()
+            if value not in (None, [], {})
+        }
+
+        trials.append(
+            TrialDefinition(
+                index=entry.sequence_index,
+                label=entry.label,
+                mode=_plan_normalise_mode(entry.mode, default_mode),
+                duration=entry.duration,
+                parameters=clean_parameters,
+                source="structured_plan",
+                sequence_index=entry.sequence_index,
+            )
+        )
+
+    return trials
+
+
+class ExperimentPlan:
+    def __init__(
+        self,
+        trials: List[TrialDefinition],
+        *,
+        inter_trial_interval: float = 0.0,
+        auto_advance: bool = False,
+        auto_start: bool = False,
+        loop: bool = False,
+        default_mode: str = "closed_loop",
+    ) -> None:
+        self._trials = trials
+        self.inter_trial_interval = max(0.0, inter_trial_interval)
+        self.auto_advance = auto_advance
+        self.auto_start = auto_start
+        self.loop = loop
+        self.default_mode = default_mode
+        self.reset()
+
+    @classmethod
+    def from_config(cls, cfg: Any, *, default_mode: str = "closed_loop") -> Optional["ExperimentPlan"]:
+        if not isinstance(cfg, dict):
+            return None
+
+        trials: List[TrialDefinition] = _plan_from_structured_definition(cfg, default_mode)
+
+        if not trials:
+            trials_cfg = cfg.get("trials")
+            if isinstance(trials_cfg, list):
+                for idx, entry in enumerate(trials_cfg, start=1):
+                    if not isinstance(entry, dict):
+                        continue
+                    mode = _plan_normalise_mode(entry.get("mode"), default_mode)
+                    label = entry.get("label")
+                    if not isinstance(label, str) or not label.strip():
+                        label = f"trial_{idx}"
+                    duration = _plan_coerce_float(entry.get("duration"))
+                    segments = _plan_clone_segments(entry.get("segments") or entry.get("schedule"))
+                    parameters: Dict[str, Any] = {}
+                    param_section = entry.get("parameters")
+                    if isinstance(param_section, dict):
+                        parameters.update(param_section)
+                    for key, value in entry.items():
+                        if key in {"mode", "label", "duration", "segments", "schedule", "parameters"}:
+                            continue
+                        parameters.setdefault(key, value)
+                    trials.append(
+                        TrialDefinition(
+                            index=idx,
+                            label=label,
+                            mode=mode,
+                            duration=duration,
+                            segments=segments,
+                            parameters=parameters,
+                            source="config",
+                            sequence_index=idx,
+                        )
+                    )
+
+        if not trials:
+            count = cfg.get("trial_count")
+            try:
+                count = int(count)
+            except (TypeError, ValueError):
+                count = 0
+            if count and count > 0:
+                duration = _plan_coerce_float(cfg.get("trial_duration"))
+                mode = _plan_normalise_mode(cfg.get("mode") or cfg.get("trial_mode"), default_mode)
+                label_template = cfg.get("trial_label_template")
+                if not isinstance(label_template, str) or not label_template.strip():
+                    label_template = "trial_{index}"
+                base_parameters: Dict[str, Any] = {}
+                param_section = cfg.get("parameters")
+                if isinstance(param_section, dict):
+                    base_parameters.update(param_section)
+                for idx in range(1, count + 1):
+                    label = label_template.format(index=idx)
+                    trials.append(
+                        TrialDefinition(
+                            index=idx,
+                            label=label,
+                            mode=mode,
+                            duration=duration,
+                            parameters=dict(base_parameters),
+                            source="config",
+                            sequence_index=idx,
+                        )
+                    )
+
+        if not trials:
+            return None
+
+        return cls(
+            trials,
+            inter_trial_interval=_plan_coerce_float(cfg.get("inter_trial_interval"), default=0.0) or 0.0,
+            auto_advance=bool(cfg.get("auto_advance", False)),
+            auto_start=bool(cfg.get("auto_start", False)),
+            loop=bool(cfg.get("loop", False)),
+            default_mode=default_mode,
+        )
+
+    def reset(self) -> None:
+        self._cursor = 0
+        self._global_index = 0
+
+    def has_remaining(self) -> bool:
+        if not self._trials:
+            return False
+        if self.loop:
+            return True
+        return self._cursor < len(self._trials)
+
+    def remaining_trials(self) -> Optional[int]:
+        if not self._trials:
+            return 0
+        if self.loop:
+            return None
+        return max(0, len(self._trials) - self._cursor)
+
+    def next_trial(
+        self,
+        overrides: Optional[Dict[str, Any]] = None,
+        *,
+        mode_hint: Optional[str] = None,
+        source: str = "plan",
+    ) -> Optional[TrialDefinition]:
+        if not self._trials:
+            return None
+        if self._cursor >= len(self._trials):
+            if not self.loop:
+                return None
+            self._cursor = 0
+        base = self._trials[self._cursor]
+        self._cursor += 1
+        self._global_index += 1
+        derived = base.merged(
+            index=self._global_index,
+            overrides=overrides,
+            mode_hint=mode_hint,
+            source=source,
+            default_mode=self.default_mode,
+        )
+        return derived
 
     def stop(self) -> None:
         self.active = False
@@ -596,6 +942,11 @@ class MousePortal(ShowBase):
         self.trial_started_at: Optional[float] = None
         self.current_input_speed: float = 0.0
 
+        self._plan_state: str = "idle"
+        self._loaded_plan_id: Optional[str] = None
+
+        self._setup_experiment_plan()
+
         cfg_port = self.cfg.get("socket_port", 8765)
         try:
             cfg_port = int(cfg_port)
@@ -646,7 +997,7 @@ class MousePortal(ShowBase):
         if bool(self.cfg.get("fullscreen", False)):
             wp.setFullscreen(True)
 
-        self.dev = dev
+        self.dev = True
         self.win.requestProperties(wp)
         self.setFrameRateMeter(bool(self.cfg.get("show_frame_rate_meter", True)))
         # Disable default mouse-based camera control for mapped input
@@ -720,6 +1071,12 @@ class MousePortal(ShowBase):
             # In development mode, enable verbose logging for debugging.
             self.messenger.toggleVerbose()
             self.accept("v", self.messenger.toggle_verbose)
+
+        if self.experiment_plan and self.experiment_plan.auto_start:
+            self._schedule_next_trial(
+                self.experiment_plan.inter_trial_interval,
+                reason="auto_start",
+            )
 
     def _default_open_loop_schedule(self) -> List[OpenLoopSegment]:
         return [
@@ -835,7 +1192,190 @@ class MousePortal(ShowBase):
         loop_flag = self.open_loop_repeat if loop is None else loop
         return OpenLoopTrial(controller_schedule, loop=loop_flag)
 
-    def _start_trial(self, trial_type: str, sent_time: Optional[float], payload: Dict[str, Any]) -> Dict[str, Any]:
+    # ------------------------------------------------------------------
+    # Experiment orchestration
+    # ------------------------------------------------------------------
+    def _setup_experiment_plan(self) -> None:
+        plan_cfg_raw = self.cfg.get("experiment")
+        plan_cfg: Optional[Dict[str, Any]] = None
+        if isinstance(plan_cfg_raw, dict):
+            try:
+                plan_cfg = json.loads(json.dumps(plan_cfg_raw))
+            except (TypeError, ValueError):
+                plan_cfg = dict(plan_cfg_raw)
+        self.experiment_plan: Optional[ExperimentPlan] = (
+            ExperimentPlan.from_config(plan_cfg, default_mode=self.default_trial_type)
+            if plan_cfg
+            else None
+        )
+        self.active_trial: Optional[Dict[str, Any]] = None
+        self._active_trial_definition: Optional[TrialDefinition] = None
+        self._trial_timer_task: Optional[Task] = None
+        self._scheduled_start_task: Optional[Task] = None
+        self._scheduled_start_reason: Optional[str] = None
+        if self.experiment_plan:
+            self.experiment_plan.reset()
+            if self._plan_state not in {"scheduled", "running", "paused"}:
+                self._plan_state = "loaded"
+        else:
+            self._plan_state = "idle"
+
+    def _augment_with_plan_info(self, info: Dict[str, Any]) -> Dict[str, Any]:
+        info["plan_state"] = self._plan_state
+        if self._loaded_plan_id:
+            info["plan_id"] = self._loaded_plan_id
+        else:
+            info.pop("plan_id", None)
+        if self.experiment_plan:
+            remaining = self.experiment_plan.remaining_trials()
+            if remaining is not None:
+                info["remaining_trials"] = remaining
+            else:
+                info.pop("remaining_trials", None)
+        else:
+            info.pop("remaining_trials", None)
+        return info
+
+    def _schedule_next_trial(self, delay: float, *, reason: str = "auto") -> None:
+        if not self.experiment_plan:
+            return
+        self._cancel_next_trial_schedule()
+        delay_seconds = max(0.0, float(delay))
+        self._scheduled_start_task = self.taskMgr.doMethodLater(
+            delay_seconds,
+            self._auto_start_next_trial,
+            f"MousePortalAutoTrial-{time.time():.3f}",
+        )
+        self._scheduled_start_reason = reason
+        if self._plan_state not in {"running", "paused"}:
+            self._plan_state = "scheduled"
+
+    def _cancel_next_trial_schedule(self) -> None:
+        if self._scheduled_start_task is not None:
+            try:
+                self._scheduled_start_task.remove()
+            except Exception:
+                self.taskMgr.remove(self._scheduled_start_task)
+            self._scheduled_start_task = None
+        self._scheduled_start_reason = None
+        if self.experiment_plan and self._plan_state == "scheduled":
+            self._plan_state = "loaded"
+
+    def _auto_start_next_trial(self, task: Task) -> Task:
+        self._scheduled_start_task = None
+        self._scheduled_start_reason = None
+        if self.experiment_plan:
+            success, info = self._start_planned_trial({}, None, source="auto")
+            if not success:
+                print(f"NO MORE TRIALS: {info}")
+        return Task.done
+
+    def _start_planned_trial(
+        self,
+        overrides: Optional[Dict[str, Any]],
+        sent_time: Optional[float],
+        *,
+        source: str,
+    ) -> tuple[bool, Dict[str, Any]]:
+        if not self.experiment_plan:
+            return False, {"error": "no_plan"}
+        self._cancel_next_trial_schedule()
+        effective_overrides = dict(overrides or {})
+        mode_hint = effective_overrides.get("mode") or effective_overrides.get("trial_type")
+        definition = self.experiment_plan.next_trial(
+            effective_overrides if effective_overrides else None,
+            mode_hint=mode_hint,
+            source=source,
+        )
+        if not definition:
+            if not self.experiment_plan.has_remaining():
+                self._plan_state = "completed"
+            return False, {"error": "no_trials_remaining"}
+        self._active_trial_definition = definition
+        payload = definition.to_payload()
+        if effective_overrides:
+            if effective_overrides.get("event_name"):
+                payload["event_name"] = effective_overrides["event_name"]
+            for key in ("duration", "segments", "schedule"):
+                if key in effective_overrides and effective_overrides[key] is not None:
+                    payload[key] = effective_overrides[key]
+            if effective_overrides.get("trial_label"):
+                payload["trial_label"] = effective_overrides["trial_label"]
+        info = self._start_trial(definition.mode, sent_time, payload, source=source)
+        info.setdefault("trial", definition.to_dict())
+        remaining = self.experiment_plan.remaining_trials()
+        if remaining is not None:
+            info["remaining_trials"] = remaining
+        self._plan_state = "running"
+        self._augment_with_plan_info(info)
+        return True, info
+
+    def _set_active_trial_metadata(self, payload: Mapping[str, Any], *, source: str) -> None:
+        metadata: Dict[str, Any] = {
+            "label": payload.get("trial_label"),
+            "index": payload.get("trial_index"),
+            "sequence_index": payload.get("trial_sequence_index"),
+            "mode": self.trial_mode,
+            "source": payload.get("trial_source", source),
+            "parameters": dict(payload.get("parameters") or {}),
+            "planned_duration": payload.get("duration") or payload.get("planned_duration"),
+            "started_at": self.trial_started_at,
+        }
+        if self._active_trial_definition:
+            metadata.setdefault("label", self._active_trial_definition.label)
+            metadata.setdefault("index", self._active_trial_definition.index)
+            metadata.setdefault("sequence_index", self._active_trial_definition.sequence_index)
+            metadata.setdefault("mode", self._active_trial_definition.mode)
+            if not metadata.get("parameters"):
+                metadata["parameters"] = dict(self._active_trial_definition.parameters or {})
+        if self.experiment_plan:
+            remaining = self.experiment_plan.remaining_trials()
+            if remaining is not None:
+                metadata["remaining_plan_trials"] = remaining
+            metadata["plan_auto_advance"] = self.experiment_plan.auto_advance
+        clean_metadata = {k: v for k, v in metadata.items() if v is not None}
+        clean_metadata.setdefault("mode", self.trial_mode)
+        clean_metadata.setdefault("label", f"{self.trial_mode}_trial")
+        self.active_trial = clean_metadata
+
+    def _schedule_trial_end(self, payload: Mapping[str, Any]) -> None:
+        duration_value = payload.get("duration") or payload.get("planned_duration")
+        if duration_value is None:
+            return
+        try:
+            seconds = float(duration_value)
+        except (TypeError, ValueError):
+            return
+        if seconds <= 0:
+            return
+        self._cancel_trial_timer()
+        self._trial_timer_task = self.taskMgr.doMethodLater(
+            seconds,
+            self._auto_stop_current_trial,
+            f"MousePortalTrialTimer-{time.time():.3f}",
+        )
+
+    def _cancel_trial_timer(self) -> None:
+        if self._trial_timer_task is not None:
+            try:
+                self._trial_timer_task.remove()
+            except Exception:
+                self.taskMgr.remove(self._trial_timer_task)
+            self._trial_timer_task = None
+
+    def _auto_stop_current_trial(self, task: Task) -> Task:
+        self._trial_timer_task = None
+        self._stop_trial(None, source="auto_timer")
+        return Task.done
+
+    def _start_trial(
+        self,
+        trial_type: str,
+        sent_time: Optional[float],
+        payload: Dict[str, Any],
+        *,
+        source: str = "manual",
+    ) -> Dict[str, Any]:
         requested = (trial_type or "closed_loop").lower()
         if requested == "open_loop":
             segments_payload = payload.get("segments") or payload.get("schedule")
@@ -854,6 +1394,10 @@ class MousePortal(ShowBase):
             requested = "closed_loop"
             controller = self.closed_loop_controller
 
+        self._cancel_trial_timer()
+        if source != "auto":
+            self._cancel_next_trial_schedule()
+
         if self.controller is not controller:
             self.controller.stop()
         self.controller = controller
@@ -861,20 +1405,48 @@ class MousePortal(ShowBase):
         self.trial_mode = requested
         self.trial_started_at = time.time()
 
+        self._set_active_trial_metadata(payload, source=source)
+
         event_name = payload.get("event_name") or f"start_{requested}"
-        self.mark_event(event_name, sent_time)
+        extras = {"trial": dict(self.active_trial)} if self.active_trial else None
+        self.mark_event(event_name, sent_time, extra=extras)
         self.fsm.request("Running")
         self._push_status(force=True)
+        self._schedule_trial_end(payload)
         info = {
             "state": self.state_name,
             "trial_mode": self.trial_mode,
             "controller": self.controller.info(),
         }
+        if self.active_trial:
+            info["trial"] = dict(self.active_trial)
         return info
 
-    def _stop_trial(self, sent_time: Optional[float]) -> Dict[str, Any]:
+    def _stop_trial(
+        self,
+        sent_time: Optional[float],
+        *,
+        source: str = "manual",
+    ) -> Dict[str, Any]:
+        self._cancel_trial_timer()
+        if source != "auto_advance":
+            self._cancel_next_trial_schedule()
+
+        trial_snapshot: Optional[Dict[str, Any]] = None
+        if self.active_trial:
+            trial_snapshot = dict(self.active_trial)
+            trial_snapshot["ended_at"] = time.time()
+            trial_snapshot["end_source"] = source
+
         if self.trial_mode != "idle":
-            self.mark_event(f"stop_{self.trial_mode}", sent_time)
+            stop_name = (
+                f"trial_end:{trial_snapshot['label']}"
+                if trial_snapshot and trial_snapshot.get("label")
+                else f"stop_{self.trial_mode}"
+            )
+            extras = {"trial": trial_snapshot} if trial_snapshot else None
+            self.mark_event(stop_name, sent_time, extra=extras)
+
         self.controller.stop()
         self.controller = self.closed_loop_controller
         self.controller.start()
@@ -882,11 +1454,40 @@ class MousePortal(ShowBase):
         self.trial_started_at = None
         self.fsm.request("Idle")
         self._push_status(force=True)
+
+        self.active_trial = None
+        self._active_trial_definition = None
+
         info = {
             "state": self.state_name,
             "trial_mode": self.trial_mode,
             "controller": self.controller.info(),
         }
+        if trial_snapshot:
+            info["trial"] = trial_snapshot
+
+        if self.experiment_plan:
+            if self._plan_state != "paused":
+                if self.experiment_plan.has_remaining():
+                    self._plan_state = "loaded"
+                else:
+                    self._plan_state = "completed"
+        else:
+            if self._plan_state != "paused":
+                self._plan_state = "idle"
+
+        if (
+            self.experiment_plan
+            and self.experiment_plan.auto_advance
+            and self.experiment_plan.has_remaining()
+            and self._plan_state != "paused"
+        ):
+            self._schedule_next_trial(
+                self.experiment_plan.inter_trial_interval,
+                reason="auto_advance",
+            )
+
+        self._augment_with_plan_info(info)
         return info
 
     def userExit(self):
@@ -962,18 +1563,25 @@ class MousePortal(ShowBase):
             return
         now = time.time()
         if force or (now - self._last_status_sent) >= self._socket_status_interval:
-            status = {
-                "type": "status",
-                "time": now,
-                "position": self.camera_position,
-                "velocity": self.camera_velocity,
-                "state": self.state_name,
-                "trial_mode": self.trial_mode,
-                "input_velocity": self.current_input_speed,
-                "controller": self.controller.info(),
-            }
+            status = portal_protocol.build_message(
+                "status",
+                time=now,
+                position=self.camera_position,
+                velocity=self.camera_velocity,
+                state=self.state_name,
+                trial_mode=self.trial_mode,
+                input_velocity=self.current_input_speed,
+                controller=self.controller.info(),
+            )
             if self.trial_started_at is not None:
                 status["trial_elapsed"] = now - self.trial_started_at
+            status["plan_state"] = self._plan_state
+            if self._loaded_plan_id:
+                status["plan_id"] = self._loaded_plan_id
+            if self.experiment_plan:
+                remaining = self.experiment_plan.remaining_trials()
+                if remaining is not None:
+                    status["remaining_trials"] = remaining
             self.socket_server.send_message(status)
             self._last_status_sent = now
 
@@ -1034,23 +1642,42 @@ class MousePortal(ShowBase):
 
     def _handle_socket_message(self, message: Dict[str, Any]) -> None:
         msg_type = message.get("type")
+        if msg_type:
+            ok, issues, _ = portal_protocol.validate_message(message, portal_protocol.HOST_TO_PORTAL)
+            if not ok:
+                print(
+                    f"SOCKET WARN invalid payload for {msg_type}: {', '.join(issues)}"
+                )
+                sys.stdout.flush()
         if msg_type == "error":
             print(f"SOCKET ERROR {message.get('message')} raw={message.get('raw')}")
             sys.stdout.flush()
             return
         if msg_type == "ping":
             if self.socket_server:
-                reply = {"type": "pong"}
+                reply_payload = portal_protocol.build_message("pong")
                 if "client_time" in message:
-                    reply["client_time"] = message["client_time"]
+                    reply_payload["client_time"] = message["client_time"]
                 if "request_id" in message:
-                    reply["request_id"] = message["request_id"]
-                self.socket_server.send_message(reply)
+                    reply_payload["request_id"] = message["request_id"]
+                self.socket_server.send_message(reply_payload)
             return
 
         command = message.get("command") or msg_type
         if not command:
             return
+
+        canonical_command, spec = portal_protocol.lookup_command(command)
+        if canonical_command is None:
+            canonical_command = command
+
+        if spec is not None:
+            ok_cmd, issues_cmd, _ = portal_protocol.validate_command_payload(canonical_command, message)
+            if not ok_cmd:
+                print(
+                    f"SOCKET WARN command {canonical_command} missing fields: {', '.join(issues_cmd)}"
+                )
+                sys.stdout.flush()
 
         sent_time: Optional[float] = None
         for key in ("sent_time", "client_time", "timestamp"):
@@ -1060,16 +1687,16 @@ class MousePortal(ShowBase):
                 break
 
         try:
-            success, info = self._execute_command(command, sent_time, message, source="socket")
+            success, info = self._execute_command(canonical_command, sent_time, message, source="socket")
         except Exception as exc:  # pragma: no cover - defensive
             success = False
             info = {"error": f"exception:{exc}"}
-            print(f"SOCKET COMMAND ERROR {command}: {exc}")
+            print(f"SOCKET COMMAND ERROR {canonical_command}: {exc}")
             sys.stdout.flush()
 
         status = "ok" if success else "error"
         if self.socket_server:
-            ack_payload: Dict[str, Any] = {"type": "ack", "command": command, "status": status}
+            ack_payload = portal_protocol.build_message("ack", command=canonical_command, status=status)
             if sent_time is not None:
                 ack_payload["sent_time"] = sent_time
             for key in ("request_id", "message_id", "id", "correlation_id"):
@@ -1089,21 +1716,182 @@ class MousePortal(ShowBase):
         payload = payload or {}
         cmd = command.lower()
 
+        if cmd == "load_experiment_plan":
+            plan_payload = payload.get("plan")
+            plan_config: Optional[Dict[str, Any]] = None
+            if isinstance(plan_payload, str):
+                try:
+                    decoded = json.loads(plan_payload)
+                except (TypeError, ValueError):
+                    return False, self._augment_with_plan_info({"error": "invalid_plan_payload"})
+                if isinstance(decoded, dict):
+                    plan_config = decoded
+            elif isinstance(plan_payload, Mapping):
+                try:
+                    plan_config = json.loads(json.dumps(plan_payload))
+                except (TypeError, ValueError):
+                    plan_config = dict(plan_payload)
+            if plan_config is None:
+                return False, self._augment_with_plan_info({"error": "plan_missing"})
+
+            previous_plan = self.experiment_plan
+            previous_plan_id = self._loaded_plan_id
+
+            if self.trial_mode != "idle":
+                self._stop_trial(sent_time, source="plan_reload")
+            self._cancel_next_trial_schedule()
+            self._cancel_trial_timer()
+
+            default_mode_value = payload.get("default_mode")
+            if isinstance(default_mode_value, str):
+                resolved_default_mode = default_mode_value.strip().lower()
+            else:
+                resolved_default_mode = self.default_trial_type
+            if resolved_default_mode not in {"open_loop", "closed_loop"}:
+                resolved_default_mode = self.default_trial_type
+
+            plan = ExperimentPlan.from_config(plan_config, default_mode=resolved_default_mode)
+            if plan is None:
+                self.experiment_plan = previous_plan
+                self._loaded_plan_id = previous_plan_id
+                self._plan_state = "loaded" if previous_plan else "idle"
+                return False, self._augment_with_plan_info({"error": "plan_invalid"})
+
+            self.experiment_plan = plan
+            self.experiment_plan.reset()
+            if "auto_advance" in payload:
+                self.experiment_plan.auto_advance = self._coerce_bool(
+                    payload.get("auto_advance"),
+                    self.experiment_plan.auto_advance,
+                )
+            if "auto_start" in payload:
+                self.experiment_plan.auto_start = self._coerce_bool(
+                    payload.get("auto_start"),
+                    self.experiment_plan.auto_start,
+                )
+            if "inter_trial_interval" in payload:
+                try:
+                    self.experiment_plan.inter_trial_interval = float(payload["inter_trial_interval"])
+                except (TypeError, ValueError):
+                    pass
+
+            self.active_trial = None
+            self._active_trial_definition = None
+            plan_id_value = payload.get("plan_id") or payload.get("id") or payload.get("name")
+            self._loaded_plan_id = str(plan_id_value) if plan_id_value is not None else None
+            self._plan_state = "loaded"
+
+            if self.experiment_plan.auto_start:
+                self._schedule_next_trial(
+                    self.experiment_plan.inter_trial_interval,
+                    reason="auto_start",
+                )
+
+            info = {
+                "state": self.state_name,
+                "trial_mode": self.trial_mode,
+                "controller": self.controller.info(),
+            }
+            self._augment_with_plan_info(info)
+            return True, info
+
+        if cmd == "run_experiment":
+            if not self.experiment_plan:
+                return False, self._augment_with_plan_info({"error": "no_plan"})
+            if payload.get("plan_id") and self._loaded_plan_id and str(payload["plan_id"]) != self._loaded_plan_id:
+                return False, self._augment_with_plan_info({"error": "plan_mismatch"})
+            restart_flag = payload.get("restart")
+            restart = True if restart_flag is None else self._coerce_bool(restart_flag, True)
+            if restart:
+                self.experiment_plan.reset()
+            overrides_payload = payload.get("trial_overrides") or payload.get("overrides")
+            overrides_dict = overrides_payload if isinstance(overrides_payload, dict) else None
+            success, info = self._start_planned_trial(overrides_dict, sent_time, source="plan")
+            self._augment_with_plan_info(info)
+            return success, info
+
+        if cmd == "pause_experiment":
+            if not self.experiment_plan:
+                return False, self._augment_with_plan_info({"error": "no_plan"})
+            if payload.get("plan_id") and self._loaded_plan_id and str(payload["plan_id"]) != self._loaded_plan_id:
+                return False, self._augment_with_plan_info({"error": "plan_mismatch"})
+            if self._plan_state != "running":
+                return False, self._augment_with_plan_info({"error": "not_running"})
+            self._plan_state = "paused"
+            info = self._stop_trial(sent_time, source="pause")
+            if payload.get("reason"):
+                info["reason"] = payload["reason"]
+            self._augment_with_plan_info(info)
+            return True, info
+
+        if cmd == "resume_experiment":
+            if not self.experiment_plan:
+                return False, self._augment_with_plan_info({"error": "no_plan"})
+            if payload.get("plan_id") and self._loaded_plan_id and str(payload["plan_id"]) != self._loaded_plan_id:
+                return False, self._augment_with_plan_info({"error": "plan_mismatch"})
+            if self._plan_state != "paused":
+                return False, self._augment_with_plan_info({"error": "not_paused"})
+            overrides_payload = payload.get("trial_overrides") or payload.get("overrides")
+            overrides_dict = overrides_payload if isinstance(overrides_payload, dict) else None
+            success, info = self._start_planned_trial(overrides_dict, sent_time, source="resume")
+            self._augment_with_plan_info(info)
+            return success, info
+
+        if cmd == "abort_experiment":
+            if payload.get("plan_id") and self._loaded_plan_id and str(payload["plan_id"]) != self._loaded_plan_id:
+                return False, self._augment_with_plan_info({"error": "plan_mismatch"})
+            if self.trial_mode != "idle":
+                info = self._stop_trial(sent_time, source="abort")
+            else:
+                info = {
+                    "state": self.state_name,
+                    "trial_mode": self.trial_mode,
+                    "controller": self.controller.info(),
+                }
+                self._augment_with_plan_info(info)
+            self._cancel_next_trial_schedule()
+            self._cancel_trial_timer()
+            clear_plan = self._coerce_bool(payload.get("clear_plan"), False)
+            if clear_plan:
+                self.experiment_plan = None
+                self._loaded_plan_id = None
+                self._plan_state = "idle"
+            else:
+                if self.experiment_plan:
+                    self.experiment_plan.reset()
+                    if self._plan_state != "paused":
+                        self._plan_state = "loaded"
+                else:
+                    self._plan_state = "idle"
+            self.active_trial = None
+            self._active_trial_definition = None
+            self._augment_with_plan_info(info)
+            if payload.get("reason"):
+                info["reason"] = payload["reason"]
+            return True, info
+
         if cmd == "start_trial":
+            use_plan = self.experiment_plan is not None and payload.get("use_plan", True) and not payload.get("manual")
+            if use_plan:
+                success, info = self._start_planned_trial(payload, sent_time, source=source)
+                return success, info
             trial_type = payload.get("trial_type") or payload.get("mode") or self.default_trial_type
-            info = self._start_trial(trial_type, sent_time, payload)
+            info = self._start_trial(trial_type, sent_time, payload, source=source)
+            self._augment_with_plan_info(info)
             return True, info
 
         if cmd == "stop_trial":
-            info = self._stop_trial(sent_time)
+            info = self._stop_trial(sent_time, source=source)
             return True, info
 
         if cmd == "start_open_loop":
-            info = self._start_trial("open_loop", sent_time, payload)
+            info = self._start_trial("open_loop", sent_time, payload, source=source)
+            self._augment_with_plan_info(info)
             return True, info
 
         if cmd == "start_closed_loop":
-            info = self._start_trial("closed_loop", sent_time, payload)
+            info = self._start_trial("closed_loop", sent_time, payload, source=source)
+            self._augment_with_plan_info(info)
             return True, info
 
         if cmd == "set_texture":
@@ -1112,45 +1900,87 @@ class MousePortal(ShowBase):
             if not face or not texture:
                 return False, {"error": "missing_face_or_texture"}
             self.corridor.set_texture(face, texture)
-            return True, {"face": face, "texture": texture, "trial_mode": self.trial_mode}
+            info = {"face": face, "texture": texture, "trial_mode": self.trial_mode}
+            self._augment_with_plan_info(info)
+            return True, info
 
         if cmd == "mark_event":
             name = payload.get("name") or payload.get("event") or "event"
-            self.mark_event(name, sent_time)
-            return True, {"event": name, "trial_mode": self.trial_mode, "controller": self.controller.info()}
+            extra = {k: v for k, v in payload.items() if k not in {"name", "event", "type", "command"}}
+            if not extra:
+                extra = None
+            self.mark_event(name, sent_time, extra=extra)
+            info = {"event": name, "trial_mode": self.trial_mode, "controller": self.controller.info()}
+            self._augment_with_plan_info(info)
+            return True, info
 
         if cmd in {"end", "shutdown", "quit", "exit"}:
             self._shutdown_requested = True
-            return True, {"state": self.state_name}
+            info = {"state": self.state_name}
+            self._augment_with_plan_info(info)
+            return True, info
 
         if cmd == "get_status":
             self._push_status(force=True)
-            return True, {"state": self.state_name, "trial_mode": self.trial_mode, "controller": self.controller.info()}
+            info = {
+                "state": self.state_name,
+                "trial_mode": self.trial_mode,
+                "controller": self.controller.info(),
+            }
+            self._augment_with_plan_info(info)
+            return True, info
 
         if cmd == "ping" and source == "socket":
             if self.socket_server:
                 self.socket_server.send_message({"type": "pong"})
             return True, {}
 
-        return False, {"error": f"unknown_command:{cmd}"}
+        error_info = {"error": f"unknown_command:{cmd}"}
+        self._augment_with_plan_info(error_info)
+        return False, error_info
 
-    def mark_event(self, name: str, sent_time: float | None = None):
+    def mark_event(
+        self,
+        name: str,
+        sent_time: float | None = None,
+        *,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
         recv = time.time()
         delta = recv - sent_time if sent_time is not None else None
-        self.events.append({'name': name, 'time_sent': sent_time, 'time_received': recv, 'position': self.camera_position, 'delta': delta})
+        record = {
+            "name": name,
+            "time_sent": sent_time,
+            "time_received": recv,
+            "position": self.camera_position,
+            "delta": delta,
+        }
+        if self.active_trial:
+            record["trial"] = dict(self.active_trial)
+        if extra:
+            record["extra"] = extra
+        self.events.append(record)
         self.event_logger.log(sent_time, recv, self.camera_position, name)
         if self.socket_server and self.socket_server.is_client_connected():
-            self.socket_server.send_message({
-                "type": "event",
-                "name": name,
-                "time_sent": sent_time,
-                "time_received": recv,
-                "delta": delta,
-                "position": self.camera_position,
-                "trial_mode": self.trial_mode,
-                "controller": self.controller.info(),
-            })
-        print(f'EVENT {name} {recv} {self.camera_position} {delta}')
+            message = portal_protocol.build_message(
+                "event",
+                name=name,
+                time_sent=sent_time,
+                time_received=recv,
+                delta=delta,
+                position=self.camera_position,
+                trial_mode=self.trial_mode,
+                controller=self.controller.info(),
+            )
+            if self.active_trial:
+                message["trial"] = dict(self.active_trial)
+            if extra:
+                for key, value in extra.items():
+                    if key in {"type", "name"}:
+                        continue
+                    message[key] = value
+            self.socket_server.send_message(message)
+        print(f"EVENT {name} {recv} {self.camera_position} {delta}")
         sys.stdout.flush()
 
 
