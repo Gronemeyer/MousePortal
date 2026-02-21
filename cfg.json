@@ -1,17 +1,50 @@
 {
-    "window_width": 1920,
-    "window_height": 1080,
-    "segment_length": 10.0,
-    "corridor_width": 8.0,
-    "wall_height": 10.0,
-    "num_segments": 50,
-    "camera_height": 2.0,
-    "speed_scaling": 0.05,
-    "left_wall_texture": "assets/test3.png",
-    "right_wall_texture": "assets/test3.png",
-    "floor_texture": "assets/black.png",
-    "ceiling_texture": "assets/white.png",
-    "data_logging_file": "maze_data.csv",
-    "fog_density": 0.06,
-    "serial_port": "COM6"
+    "window": {
+        "width": 1920,
+        "height": 1080
+    },
+    "corridor": {
+        "segment_length": 10.0,
+        "corridor_width": 8.0,
+        "wall_height": 10.0,
+        "num_segments": 50,
+        "left_wall_texture": "assets/test3.png",
+        "right_wall_texture": "assets/test3.png",
+        "floor_texture": "assets/black.png",
+        "ceiling_texture": "assets/white.png"
+    },
+    "camera": {
+        "height": 2.0,
+        "speed_scaling": 0.05,
+        "keyboard_speed": 20.0
+    },
+    "fog": {
+        "density": 0.06,
+        "color": [0.5, 0.5, 0.5]
+    },
+    "input": {
+        "mode": "keyboard",
+        "serial_port": "/dev/ttyUSB0",
+        "baud_rate": 57600
+    },
+    "experiment": {
+        "num_blocks": 1,
+        "trials_per_block": 3,
+        "iti_duration": 2.0,
+        "trial_end_condition": "manual",
+        "trial_distance": 100.0,
+        "trial_duration": 60.0,
+        "block_conditions": []
+    },
+    "triggers": {
+        "enabled": false,
+        "port": "",
+        "baud_rate": 9600
+    },
+    "logging": {
+        "subject": "001",
+        "session": "01",
+        "task": "corridor",
+        "output_dir": "data"
+    }
 }

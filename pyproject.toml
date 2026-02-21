@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mouseportal"
+dynamic = ["version"]
+description = "Infinite corridor stimulus for Panda3D — rodent treadmill experiments"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Jacob Gronemeyer"},
+]
+dependencies = [
+    "panda3d",
+    "pyserial",
+]
+
+[project.scripts]
+mouseportal = "mouseportal.app:MousePortal"
+
+[tool.setuptools.packages.find]
+include = ["mouseportal*"]
+
+[tool.setuptools_scm]
+write_to = "mouseportal/_version.py"
+version_scheme = "guess-next-dev"
+local_scheme = "node-and-date"

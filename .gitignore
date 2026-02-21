@@ -2,6 +2,10 @@
 __pycache__/
 *.py[cod]
 *$py.class
+*.DS_Store
+
+# Auto-generated version file (setuptools-scm)
+mouseportal/_version.py
 
 # C extensions
 *.so
