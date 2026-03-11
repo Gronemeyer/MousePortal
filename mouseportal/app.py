@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from direct.showbase.ShowBase import ShowBase
 from direct.task.Task import Task
-from panda3d.core import TextNode, WindowProperties
+from panda3d.core import TextNode, WindowProperties, LVecBase4f
 
-from mouseportal.config import PortalConfig
+from mouseportal.config import PortalConfig, TrialEndCondition
 from mouseportal.corridor import Corridor
 from mouseportal.datalog import DataLogger
 from mouseportal.experiment import ExperimentState, ExperimentStateMachine
@@ -88,14 +88,46 @@ class MousePortal(ShowBase):
 
         # ---- Debug HUD (toggle with F1) ------------------------------
         self._debug_hud_on = True
-        self._debug_text = TextNode("debug_hud")
-        self._debug_text.setAlign(TextNode.ALeft)
-        self._debug_text.setTextColor(1, 1, 0, 1)
-        self._debug_text.setShadow(0.05, 0.05)
-        self._debug_text.setShadowColor(0, 0, 0, 0.8)
-        self._debug_np = self.aspect2d.attachNewNode(self._debug_text)
-        self._debug_np.setScale(0.045)
-        self._debug_np.setPos(-1.3, 0, 0.9)
+        self._debug_root = self.aspect2d.attachNewNode("debug_hud_root")
+
+        # -- Title bar --
+        self._title_tn = TextNode("hud_title")
+        self._title_tn.setAlign(TextNode.ALeft)
+        self._title_tn.setTextColor(0.3, 0.9, 1.0, 1.0)       # cyan
+        self._title_tn.setShadow(0.04, 0.04)
+        self._title_tn.setShadowColor(0, 0, 0, 0.9)
+        self._title_tn.setCardColor(0.05, 0.05, 0.1, 0.75)
+        self._title_tn.setCardAsMargin(0.15, 0.15, 0.08, 0.08)
+        self._title_tn.setCardDecal(True)
+        self._title_np = self._debug_root.attachNewNode(self._title_tn)
+        self._title_np.setScale(0.055)
+        self._title_np.setPos(-1.35, 0, 0.95)
+
+        # -- Main info panel --
+        self._info_tn = TextNode("hud_info")
+        self._info_tn.setAlign(TextNode.ALeft)
+        self._info_tn.setTextColor(0.95, 0.92, 0.5, 1.0)      # warm yellow
+        self._info_tn.setShadow(0.04, 0.04)
+        self._info_tn.setShadowColor(0, 0, 0, 0.9)
+        self._info_tn.setCardColor(0.05, 0.05, 0.1, 0.7)
+        self._info_tn.setCardAsMargin(0.15, 0.15, 0.1, 0.1)
+        self._info_tn.setCardDecal(True)
+        self._info_np = self._debug_root.attachNewNode(self._info_tn)
+        self._info_np.setScale(0.04)
+        self._info_np.setPos(-1.35, 0, 0.85)
+
+        # -- Keys footer --
+        self._keys_tn = TextNode("hud_keys")
+        self._keys_tn.setAlign(TextNode.ALeft)
+        self._keys_tn.setTextColor(0.6, 0.6, 0.6, 0.85)       # dim gray
+        self._keys_tn.setShadow(0.04, 0.04)
+        self._keys_tn.setShadowColor(0, 0, 0, 0.7)
+        self._keys_np = self._debug_root.attachNewNode(self._keys_tn)
+        self._keys_np.setScale(0.035)
+        self._keys_np.setPos(-1.35, 0, -0.92)
+        self._keys_tn.setText(
+            "[Space] start / end trial    [F1] toggle HUD    [Esc] quit"
+        )
 
         self.taskMgr.add(self._update, "updateTask")
 
@@ -115,8 +147,12 @@ class MousePortal(ShowBase):
 
         # 3. Only move camera during TRIAL_RUNNING (or IDLE for free-run).
         move: float = 0.0
+        effective_velocity: float = velocity
         if state in (ExperimentState.TRIAL_RUNNING, ExperimentState.IDLE):
-            move = velocity * dt
+            effective_velocity = self.experiment.apply_transform(
+                velocity, dt, self._camera_position,
+            )
+            move = effective_velocity * dt
             self._camera_position += move
             self.camera.setY(self._camera_position)
 
@@ -134,6 +170,8 @@ class MousePortal(ShowBase):
         self.data_logger.log_frame(
             position=self._camera_position,
             velocity=velocity,
+            effective_velocity=effective_velocity,
+            condition=self.experiment.condition.label,
             state=state.name,
             block=self.experiment.block,
             trial=self.experiment.trial,
@@ -141,12 +179,51 @@ class MousePortal(ShowBase):
 
         # 6. Debug HUD.
         if self._debug_hud_on:
-            self._debug_text.setText(
-                f"State: {state.name}\n"
-                f"Block: {self.experiment.block}  Trial: {self.experiment.trial}\n"
-                f"Pos: {self._camera_position:.2f}  Vel: {velocity:.3f}\n"
-                f"Input: {self.cfg.input.mode.value}\n"
-                f"[Space] start/end trial  [F1] toggle HUD  [Esc] quit"
+            fps = globalClock.getAverageFrameRate()  # type: ignore[name-defined]
+            cond = self.experiment.condition
+            exp = self.experiment
+            ecfg = self.cfg.experiment
+
+            # Title
+            self._title_tn.setText(f"MousePortal  v{self._get_version()}")
+
+            # Trial progress line
+            progress = self._format_trial_progress(
+                state, exp, ecfg, effective_velocity,
+            )
+
+            # Condition detail
+            transform_info = cond.transform_type
+            if cond.transform_params:
+                params_str = "  ".join(
+                    f"{k}={v}" for k, v in cond.transform_params.items()
+                )
+                transform_info += f"  ({params_str})"
+
+            # Gain ratio (effective / raw) — shows the transform's effect
+            if abs(velocity) > 0.001:
+                gain_ratio = effective_velocity / velocity
+                gain_str = f"{gain_ratio:+.2f}x"
+            else:
+                gain_str = "--"
+
+            self._info_tn.setText(
+                f"STATE       {state.name}\n"
+                f"BLOCK       {exp.block} / {ecfg.num_blocks}"
+                f"      TRIAL  {exp.trial} / {ecfg.trials_per_block}\n"
+                f"CONDITION   {cond.label}"
+                f"    TRANSFORM  {transform_info}\n"
+                f"\n"
+                f"POSITION    {self._camera_position:>10.2f}\n"
+                f"RAW VEL     {velocity:>10.3f}\n"
+                f"EFF VEL     {effective_velocity:>10.3f}"
+                f"    GAIN  {gain_str}\n"
+                f"\n"
+                f"{progress}\n"
+                f"\n"
+                f"INPUT       {self.cfg.input.mode.value}"
+                f"      END COND  {exp.active_end_condition.value}\n"
+                f"FPS         {fps:.0f}"
             )
 
         return Task.cont
@@ -170,10 +247,69 @@ class MousePortal(ShowBase):
         """F1: toggle the on-screen debug overlay."""
         self._debug_hud_on = not self._debug_hud_on
         if self._debug_hud_on:
-            self._debug_np.show()
+            self._debug_root.show()
         else:
-            self._debug_np.hide()
-            self._debug_text.setText("")
+            self._debug_root.hide()
+
+    # ------------------------------------------------------------------
+    # Debug HUD helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_version() -> str:
+        try:
+            from mouseportal._version import version
+            return version
+        except ImportError:
+            return "dev"
+
+    @staticmethod
+    def _format_trial_progress(
+        state: "ExperimentState",
+        exp: "ExperimentStateMachine",
+        ecfg: "object",
+        effective_velocity: float,
+    ) -> str:
+        """Build a progress string with a text bar for the active phase."""
+        bar_width = 20
+
+        if state == ExperimentState.TRIAL_RUNNING:
+            end_cond = exp.active_end_condition
+            if end_cond == TrialEndCondition.DISTANCE:
+                target = exp.active_trial_distance
+                frac = min(exp.trial_distance / target, 1.0) if target > 0 else 0.0
+                filled = int(frac * bar_width)
+                bar = "|" + "=" * filled + "-" * (bar_width - filled) + "|"
+                return (
+                    f"TRIAL       {bar} {frac * 100:5.1f}%\n"
+                    f"            {exp.trial_distance:.1f} / {target:.1f} dist"
+                    f"   ({exp.trial_elapsed:.1f}s)"
+                )
+            elif end_cond == TrialEndCondition.DURATION:
+                target = exp.active_trial_duration
+                frac = min(exp.trial_elapsed / target, 1.0) if target > 0 else 0.0
+                filled = int(frac * bar_width)
+                bar = "|" + "=" * filled + "-" * (bar_width - filled) + "|"
+                return (
+                    f"TRIAL       {bar} {frac * 100:5.1f}%\n"
+                    f"            {exp.trial_elapsed:.1f} / {target:.1f}s"
+                )
+            else:  # MANUAL
+                return f"TRIAL       elapsed {exp.trial_elapsed:.1f}s   (manual end)"
+
+        elif state == ExperimentState.INTER_TRIAL_INTERVAL:
+            frac = min(exp.iti_elapsed / ecfg.iti_duration, 1.0) if ecfg.iti_duration > 0 else 0.0
+            filled = int(frac * bar_width)
+            bar = "|" + "." * filled + " " * (bar_width - filled) + "|"
+            return f"ITI         {bar} {exp.iti_elapsed:.1f} / {ecfg.iti_duration:.1f}s"
+
+        elif state == ExperimentState.IDLE:
+            return "            Press [Space] to begin"
+
+        elif state == ExperimentState.SESSION_COMPLETE:
+            return "            Session complete"
+
+        return ""
 
     def _shutdown(self) -> None:
         """Clean shutdown: close resources, then exit."""

@@ -33,8 +33,10 @@ class DataLogger:
         "state",
         "block",
         "trial",
+        "condition",
         "position",
         "velocity",
+        "effective_velocity",
         "event",
     ]
 
@@ -72,6 +74,8 @@ class DataLogger:
         self,
         position: float,
         velocity: float,
+        effective_velocity: float = 0.0,
+        condition: str = "",
         state: str = "",
         block: int = 0,
         trial: int = 0,
@@ -87,8 +91,10 @@ class DataLogger:
             "state": state,
             "block": block,
             "trial": trial,
+            "condition": condition,
             "position": position,
             "velocity": velocity,
+            "effective_velocity": effective_velocity,
             "event": event,
         }
         self._writer.writerow(row)

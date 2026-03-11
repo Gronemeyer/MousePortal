@@ -28,13 +28,22 @@
         "baud_rate": 57600
     },
     "experiment": {
-        "num_blocks": 1,
-        "trials_per_block": 3,
+        "num_blocks": 2,
+        "trials_per_block": 4,
         "iti_duration": 2.0,
-        "trial_end_condition": "manual",
-        "trial_distance": 100.0,
+        "trial_end_condition": "distance",
+        "trial_distance": 50.0,
         "trial_duration": 60.0,
-        "block_conditions": []
+        "conditions": [
+            {"label": "normal", "transform_type": "identity"},
+            {"label": "freeze", "transform_type": "freeze", "trial_end_condition": "duration", "trial_duration": 10.0},
+            {"label": "gain_2x", "transform_type": "gain", "transform_params": {"gain": 2.0}},
+            {"label": "invert", "transform_type": "invert"}
+        ],
+        "block_conditions": [
+            {"condition_sequence": ["normal", "freeze", "normal", "gain_2x"]},
+            {"condition_sequence": ["invert", "normal", "freeze", "normal"]}
+        ]
     },
     "triggers": {
         "enabled": false,

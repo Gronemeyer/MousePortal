@@ -104,6 +104,34 @@ class InputConfig:
 
 
 @dataclass(frozen=True)
+class TrialCondition:
+    """Describes what happens during a single trial.
+
+    The ``transform_type`` and ``transform_params`` fields select a
+    :class:`~mouseportal.transforms.VelocityTransform` that is applied
+    between raw input and camera movement.  Additional fields (e.g.
+    texture overrides, trigger cues) can be added here for future
+    paradigms like go/no-go without changing downstream code.
+
+    Per-condition trial-end overrides
+    ---------------------------------
+    If ``trial_end_condition`` is set it takes precedence over the
+    global ``ExperimentConfig.trial_end_condition`` for this condition.
+    ``trial_distance`` and ``trial_duration`` work the same way.  When
+    left as ``None`` the global value is used.
+    """
+    label: str = "normal"
+    transform_type: str = "identity"
+    transform_params: Dict[str, Any] = field(default_factory=dict)
+    trial_end_condition: Optional[str] = None   # "distance", "duration", "manual"
+    trial_distance: Optional[float] = None
+    trial_duration: Optional[float] = None
+    # Future go/no-go fields (uncomment when needed):
+    # wall_texture_override: Optional[str] = None
+    # trigger_on_enter: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     num_blocks: int = 1
     trials_per_block: int = 1
@@ -111,6 +139,7 @@ class ExperimentConfig:
     trial_end_condition: TrialEndCondition = TrialEndCondition.MANUAL
     trial_distance: float = 100.0       # used when condition == DISTANCE
     trial_duration: float = 60.0        # used when condition == DURATION
+    conditions: List[TrialCondition] = field(default_factory=list)
     block_conditions: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -120,6 +149,27 @@ class ExperimentConfig:
             raise ValueError(f"trials_per_block must be >= 1: {self.trials_per_block}")
         if self.iti_duration < 0:
             raise ValueError(f"iti_duration must be non-negative: {self.iti_duration}")
+
+    def condition_for(self, block: int, trial: int) -> TrialCondition:
+        """Look up the condition for a given (1-indexed) block and trial.
+
+        Falls back to ``TrialCondition()`` (identity / normal) when the
+        config does not specify conditions.
+        """
+        if not self.block_conditions or not self.conditions:
+            return TrialCondition()
+        block_idx = block - 1
+        trial_idx = trial - 1
+        if block_idx < 0 or block_idx >= len(self.block_conditions):
+            return TrialCondition()
+        seq = self.block_conditions[block_idx].get("condition_sequence", [])
+        if trial_idx < 0 or trial_idx >= len(seq):
+            return TrialCondition()
+        label = seq[trial_idx]
+        for cond in self.conditions:
+            if cond.label == label:
+                return cond
+        return TrialCondition()
 
 
 @dataclass(frozen=True)
@@ -276,4 +326,10 @@ def _parse_experiment(d: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(d)
     if "trial_end_condition" in out and isinstance(out["trial_end_condition"], str):
         out["trial_end_condition"] = TrialEndCondition(out["trial_end_condition"])
+    # Parse conditions list → TrialCondition instances
+    if "conditions" in out and isinstance(out["conditions"], list):
+        out["conditions"] = [
+            TrialCondition(**c) if isinstance(c, dict) else c
+            for c in out["conditions"]
+        ]
     return out
