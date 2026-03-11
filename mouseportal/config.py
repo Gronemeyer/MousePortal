@@ -29,9 +29,7 @@ class TrialEndCondition(str, Enum):
     MANUAL = "manual"       # Trial ends on external trigger / keypress
 
 
-# ---------------------------------------------------------------------------
-# Sub-configs
-# ---------------------------------------------------------------------------
+# ─── Sub-configs ────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class WindowConfig:
@@ -211,9 +209,7 @@ class LoggingConfig:
         return os.path.join(beh_dir, filename)
 
 
-# ---------------------------------------------------------------------------
-# Top-level config
-# ---------------------------------------------------------------------------
+# ─── Top-level config ───────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class PortalConfig:
@@ -227,7 +223,7 @@ class PortalConfig:
     triggers: TriggerConfig = field(default_factory=TriggerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
-    # ------------------------------------------------------------------
+    # ─── Loaders ────────────────────────────────────────────────────────
     @classmethod
     def from_json(cls, path: str) -> "PortalConfig":
         """
@@ -301,9 +297,7 @@ class PortalConfig:
         )
 
 
-# ---------------------------------------------------------------------------
-# Parsing helpers (normalise JSON → dataclass kwargs)
-# ---------------------------------------------------------------------------
+# ─── Parsing helpers (normalise JSON → dataclass kwargs) ────────────────────
 
 def _parse_fog(d: Dict[str, Any]) -> Dict[str, Any]:
     """Convert fog JSON (color may be a list) to FogConfig kwargs."""

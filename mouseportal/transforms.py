@@ -21,9 +21,7 @@ from collections import deque
 from typing import Any, Dict
 
 
-# ------------------------------------------------------------------
-# Abstract base
-# ------------------------------------------------------------------
+# ─── Abstract base ──────────────────────────────────────────────────────────
 
 class VelocityTransform(ABC):
     """Protocol for all velocity transforms."""
@@ -52,9 +50,7 @@ class VelocityTransform(ABC):
         """Reset any internal state (called at trial start)."""
 
 
-# ------------------------------------------------------------------
-# Concrete transforms
-# ------------------------------------------------------------------
+# ─── Concrete transforms ────────────────────────────────────────────────────
 
 class IdentityTransform(VelocityTransform):
     """Passthrough — no modification.  Used for normal / control trials."""
@@ -163,9 +159,7 @@ class DelayTransform(VelocityTransform):
         self._elapsed = 0.0
 
 
-# ------------------------------------------------------------------
-# Factory
-# ------------------------------------------------------------------
+# ─── Factory ────────────────────────────────────────────────────────────────
 
 _REGISTRY: Dict[str, type] = {
     "identity": IdentityTransform,

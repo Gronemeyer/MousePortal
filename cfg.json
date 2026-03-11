@@ -28,7 +28,7 @@
         "baud_rate": 57600
     },
     "experiment": {
-        "num_blocks": 2,
+        "num_blocks": 20,
         "trials_per_block": 4,
         "iti_duration": 2.0,
         "trial_end_condition": "distance",

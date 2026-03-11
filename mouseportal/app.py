@@ -131,9 +131,7 @@ class MousePortal(ShowBase):
 
         self.taskMgr.add(self._update, "updateTask")
 
-    # ------------------------------------------------------------------
-    # Core loop
-    # ------------------------------------------------------------------
+    # ─── Core loop ──────────────────────────────────────────────────────────
 
     def _update(self, task: Task) -> int:
         """Per-frame update: input → experiment → move → recycle → log."""
@@ -148,7 +146,7 @@ class MousePortal(ShowBase):
         # 3. Only move camera during TRIAL_RUNNING (or IDLE for free-run).
         move: float = 0.0
         effective_velocity: float = velocity
-        if state in (ExperimentState.TRIAL_RUNNING, ExperimentState.IDLE):
+        if state in (ExperimentState.TRIAL_RUNNING, ExperimentState.IDLE, ExperimentState.INTER_TRIAL_INTERVAL):
             effective_velocity = self.experiment.apply_transform(
                 velocity, dt, self._camera_position,
             )
@@ -228,9 +226,7 @@ class MousePortal(ShowBase):
 
         return Task.cont
 
-    # ------------------------------------------------------------------
-    # Event handlers
-    # ------------------------------------------------------------------
+    # ─── Event handlers ─────────────────────────────────────────────────────
 
     def _on_experiment_event(self, event_name: str, details: dict) -> None:
         """Relay experiment state-transition events to the data log."""
@@ -251,9 +247,7 @@ class MousePortal(ShowBase):
         else:
             self._debug_root.hide()
 
-    # ------------------------------------------------------------------
-    # Debug HUD helpers
-    # ------------------------------------------------------------------
+    # ─── Debug HUD helpers ──────────────────────────────────────────────────
 
     @staticmethod
     def _get_version() -> str:
@@ -317,3 +311,100 @@ class MousePortal(ShowBase):
         self.input.close()
         self.triggers.close()
         self.userExit()
+
+
+def main() -> None:
+    """CLI entry point for the ``mouseportal`` command."""
+    import argparse
+    import json
+    import sys
+    from pathlib import Path
+
+    parser = argparse.ArgumentParser(
+        description="MousePortal infinite corridor stimulus",
+    )
+    parser.add_argument(
+        "-c", "--config",
+        default="cfg.json",
+        help="Path to JSON configuration file (default: cfg.json)",
+    )
+    parser.add_argument(
+        "--init",
+        action="store_true",
+        help="Write a default cfg.json to the current directory and exit",
+    )
+    args = parser.parse_args()
+
+    if args.init:
+        dest = Path(args.config)
+        if dest.exists():
+            print(f"[MousePortal] '{dest}' already exists — not overwriting.", file=sys.stderr)
+            sys.exit(1)
+        dest.write_text(json.dumps(_DEFAULT_CONFIG, indent=4) + "\n")
+        print(f"[MousePortal] Wrote default config to '{dest}'")
+        return
+
+    try:
+        app = MousePortal(args.config)
+    except (RuntimeError, ValueError) as exc:
+        print(f"[MousePortal] startup error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    app.run()
+
+
+_DEFAULT_CONFIG: dict = {
+    "window": {
+        "width": 1920,
+        "height": 1080,
+    },
+    "corridor": {
+        "segment_length": 10.0,
+        "corridor_width": 8.0,
+        "wall_height": 10.0,
+        "num_segments": 50,
+        "left_wall_texture": "assets/test3.png",
+        "right_wall_texture": "assets/test3.png",
+        "floor_texture": "assets/black.png",
+        "ceiling_texture": "assets/white.png",
+    },
+    "camera": {
+        "height": 2.0,
+        "speed_scaling": 0.05,
+        "keyboard_speed": 20.0,
+    },
+    "fog": {
+        "density": 0.06,
+        "color": [0.5, 0.5, 0.5],
+    },
+    "input": {
+        "mode": "keyboard",
+        "serial_port": "/dev/ttyUSB0",
+        "baud_rate": 57600,
+    },
+    "experiment": {
+        "num_blocks": 2,
+        "trials_per_block": 2,
+        "iti_duration": 2.0,
+        "trial_end_condition": "distance",
+        "trial_distance": 50.0,
+        "trial_duration": 60.0,
+        "conditions": [
+            {"label": "normal", "transform_type": "identity"},
+        ],
+        "block_conditions": [
+            {"condition_sequence": ["normal", "normal"]},
+        ],
+    },
+    "triggers": {
+        "enabled": False,
+        "port": "",
+        "baud_rate": 9600,
+    },
+    "logging": {
+        "subject": "001",
+        "session": "01",
+        "task": "corridor",
+        "output_dir": "data",
+    },
+}

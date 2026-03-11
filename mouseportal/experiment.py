@@ -69,9 +69,7 @@ class ExperimentStateMachine:
         self._active_trial_distance: float = cfg.trial_distance
         self._active_trial_duration: float = cfg.trial_duration
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ─── Public API ─────────────────────────────────────────────────────────
 
     def start(self) -> None:
         """Begin the first block (call once to kick off the session)."""
@@ -147,9 +145,7 @@ class ExperimentStateMachine:
         """Apply the active trial's velocity transform."""
         return self._transform(velocity, dt, position)
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
+    # ─── Internals ──────────────────────────────────────────────────────────
 
     def _transition(self, new_state: ExperimentState, **details: Any) -> None:
         old = self.state
@@ -236,9 +232,7 @@ class ExperimentStateMachine:
         if self._iti_elapsed >= self.cfg.iti_duration:
             self._begin_next_trial()
 
-    # ------------------------------------------------------------------
-    # External triggers
-    # ------------------------------------------------------------------
+    # ─── External triggers ──────────────────────────────────────────────────
 
     def end_trial(self) -> None:
         """Manually end the current trial (for MANUAL condition or abort)."""

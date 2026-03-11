@@ -70,9 +70,7 @@ class Corridor:
 
         self._build_segments()
 
-    # ------------------------------------------------------------------
-    # Construction
-    # ------------------------------------------------------------------
+    # ─── Construction ───────────────────────────────────────────────────────
 
     def _build_segments(self) -> None:
         """Build the initial corridor segments using CardMaker."""
@@ -80,6 +78,12 @@ class Corridor:
             y_start: float = i * self.segment_length
             seg = self._make_slice(y_start)
             self.segments.append(seg)
+        
+        # Append 2 segments backward
+        for i in range(1, 3):
+            y_start: float = -i * self.segment_length
+            seg = self._make_slice(y_start)
+            self.segments.appendleft(seg)
 
     def _make_slice(self, y: float) -> SegmentSlice:
         """Create a single four-face corridor slice at the given Y position."""
@@ -126,9 +130,7 @@ class Corridor:
         tex: Texture = self.base.loader.loadTexture(texture_path)
         node.setTexture(tex)
 
-    # ------------------------------------------------------------------
-    # Recycling
-    # ------------------------------------------------------------------
+    # ─── Recycling ──────────────────────────────────────────────────────────
 
     def recycle_forward(self) -> None:
         """Pop the trailing (oldest) slice and append it past the leading end."""

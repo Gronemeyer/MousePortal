@@ -22,9 +22,7 @@ if TYPE_CHECKING:
     from direct.showbase.ShowBase import ShowBase
 
 
-# ------------------------------------------------------------------
-# Shared data type
-# ------------------------------------------------------------------
+# ─── Shared data type ───────────────────────────────────────────────────────
 
 @dataclass
 class EncoderData:
@@ -40,9 +38,7 @@ class EncoderData:
         )
 
 
-# ------------------------------------------------------------------
-# Serial backend
-# ------------------------------------------------------------------
+# ─── Serial backend ─────────────────────────────────────────────────────────
 
 class _SerialBackend(DirectObject.DirectObject):
     """
@@ -119,9 +115,7 @@ class _SerialBackend(DirectObject.DirectObject):
             self._serial.close()
 
 
-# ------------------------------------------------------------------
-# Keyboard backend
-# ------------------------------------------------------------------
+# ─── Keyboard backend ───────────────────────────────────────────────────────
 
 class _KeyboardBackend:
     """Keyboard arrow-key input: sets a velocity when keys are held."""
@@ -151,9 +145,7 @@ class _KeyboardBackend:
         pass
 
 
-# ------------------------------------------------------------------
-# Unified InputManager
-# ------------------------------------------------------------------
+# ─── Unified InputManager ───────────────────────────────────────────────────
 
 class InputManager:
     """

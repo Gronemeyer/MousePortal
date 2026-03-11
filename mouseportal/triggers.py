@@ -37,9 +37,7 @@ class TriggerManager:
                     f"Trigger serial port '{cfg.port}' failed to open: {exc}"
                 ) from exc
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ─── Public API ─────────────────────────────────────────────────────────
 
     def send_reward(self) -> None:
         """Send a reward trigger pulse."""
@@ -54,9 +52,7 @@ class TriggerManager:
         if self._serial is not None and self._serial.is_open:
             self._serial.close()
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
+    # ─── Internal ───────────────────────────────────────────────────────────
 
     def _write(self, data: bytes) -> None:
         if not self._enabled or self._serial is None:
