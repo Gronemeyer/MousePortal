@@ -188,7 +188,8 @@ class LoggingConfig:
     subject: str = ""     # e.g. "001"
     session: str = ""     # e.g. "01"
     task: str = ""        # e.g. "corridor"
-    output_dir: str = "data"  # root output directory
+    output_dir: str = "data"  # root output directory (standalone use)
+    output_path: str = ""     # explicit full CSV path (overrides BIDS layout)
 
     def __post_init__(self) -> None:
         if not self.subject:
@@ -200,13 +201,17 @@ class LoggingConfig:
 
     def bids_path(self) -> str:
         """
-        Build a BIDS-compliant output path.
+        Resolve the output CSV path.
 
-        Returns
-        -------
-        str
-            e.g. ``data/sub-001/ses-01/beh/sub-001_ses-01_task-corridor_portal.csv``
+        If ``output_path`` is set (e.g. an orchestrator such as mesofield owns
+        path construction and hands MousePortal the exact file), it is used
+        verbatim — MousePortal does NOT build its own directory layout.
+        Otherwise a BIDS-compliant path is built under ``output_dir`` for
+        standalone use, e.g.
+        ``data/sub-001/ses-01/beh/sub-001_ses-01_task-corridor_portal.csv``.
         """
+        if self.output_path:
+            return self.output_path
         import os
         sub = f"sub-{self.subject}"
         ses = f"ses-{self.session}"
