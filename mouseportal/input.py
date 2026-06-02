@@ -8,6 +8,8 @@ chosen at construction time from ``InputConfig.mode``.
 
 from __future__ import annotations
 
+import socket
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Optional
@@ -36,6 +38,33 @@ class EncoderData:
             f"EncoderData(timestamp={self.timestamp}, "
             f"distance={self.distance:.3f} mm, speed={self.speed:.3f} mm/s)"
         )
+
+
+def parse_encoder_csv(line: str) -> Optional[EncoderData]:
+    """Parse one CSV encoder reading shared by the serial and network backends.
+
+    Accepted formats:
+      - ``timestamp,distance,speed`` (timestamp is the device microsecond clock)
+      - ``distance,speed``
+
+    Returns ``None`` for unparseable lines (headers, noise).
+    """
+    parts = line.split(",")
+    try:
+        if len(parts) == 3:
+            return EncoderData(
+                timestamp=int(float(parts[0].strip())),
+                distance=float(parts[1].strip()),
+                speed=float(parts[2].strip()),
+            )
+        elif len(parts) == 2:
+            return EncoderData(
+                distance=float(parts[0].strip()),
+                speed=float(parts[1].strip()),
+            )
+    except ValueError:
+        pass
+    return None
 
 
 # ─── Serial backend ─────────────────────────────────────────────────────────
@@ -81,38 +110,72 @@ class _SerialBackend(DirectObject.DirectObject):
     def _store_data(self, data: EncoderData) -> None:
         self.data = data
 
-    @staticmethod
-    def _parse_line(line: str) -> Optional[EncoderData]:
-        """
-        Parse a CSV line from the encoder.
-
-        Accepted formats:
-          - ``timestamp,distance,speed``
-          - ``distance,speed``
-
-        Returns ``None`` for unparseable lines (headers, noise).
-        """
-        parts = line.split(",")
-        try:
-            if len(parts) == 3:
-                return EncoderData(
-                    timestamp=int(parts[0].strip()),
-                    distance=float(parts[1].strip()),
-                    speed=float(parts[2].strip()),
-                )
-            elif len(parts) == 2:
-                return EncoderData(
-                    distance=float(parts[0].strip()),
-                    speed=float(parts[1].strip()),
-                )
-        except ValueError:
-            pass
-        return None
+    _parse_line = staticmethod(parse_encoder_csv)
 
     def close(self) -> None:
         """Release the serial port."""
         if self._serial and self._serial.is_open:
             self._serial.close()
+
+
+# ─── Network backend ────────────────────────────────────────────────────────
+
+class _NetworkBackend:
+    """Receives encoder data forwarded over a localhost UDP socket.
+
+    Mesofield owns the treadmill serial port and forwards each parsed sample
+    (``device_us,distance,speed``) as a UDP datagram so MousePortal and the
+    acquisition system never contend for the port.  A daemon thread keeps the
+    latest reading in ``self.data``; ``last_device_us`` exposes the device
+    microsecond clock used for offline synchronisation with the cameras.
+    """
+
+    def __init__(self, host: str, port: int) -> None:
+        self.data = EncoderData()
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self._sock.bind((host, port))
+        except OSError as exc:
+            raise RuntimeError(
+                f"Failed to bind UDP socket {host}:{port}: {exc}"
+            ) from exc
+        self._sock.settimeout(0.5)
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._recv_loop, name="MousePortalUDP", daemon=True
+        )
+        self._thread.start()
+
+    def _recv_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                raw, _addr = self._sock.recvfrom(256)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            data = parse_encoder_csv(line)
+            if data is not None:
+                self.data = data
+
+    @property
+    def velocity(self) -> float:
+        return self.data.speed
+
+    @property
+    def last_device_us(self) -> int:
+        return self.data.timestamp
+
+    def close(self) -> None:
+        self._stop.set()
+        try:
+            self._sock.close()
+        except OSError:
+            pass
 
 
 # ─── Keyboard backend ───────────────────────────────────────────────────────
@@ -166,12 +229,15 @@ class InputManager:
         self._mode = cfg.mode
         self._serial: Optional[_SerialBackend] = None
         self._keyboard: Optional[_KeyboardBackend] = None
+        self._network: Optional[_NetworkBackend] = None
 
         if self._mode == InputMode.SERIAL:
             self._serial = _SerialBackend(cfg.serial_port, cfg.baud_rate, base.messenger)
             base.taskMgr.add(self._serial.read_serial_task, "readSerialTask")
         elif self._mode == InputMode.KEYBOARD:
             self._keyboard = _KeyboardBackend(base, keyboard_speed)
+        elif self._mode == InputMode.NETWORK:
+            self._network = _NetworkBackend(cfg.host, cfg.udp_port)
         else:
             raise ValueError(f"Unknown input mode: {self._mode}")
 
@@ -182,7 +248,23 @@ class InputManager:
             return self._serial.data.speed
         if self._mode == InputMode.KEYBOARD and self._keyboard is not None:
             return self._keyboard.velocity
+        if self._mode == InputMode.NETWORK and self._network is not None:
+            return self._network.velocity
         return 0.0
+
+    @property
+    def last_device_us(self) -> int:
+        """Latest treadmill device microsecond timestamp (0 if unavailable).
+
+        Only the serial and network backends carry a device clock; this is
+        the anchor MousePortal logs per frame for offline synchronisation
+        with the mesofield cameras.
+        """
+        if self._mode == InputMode.SERIAL and self._serial is not None:
+            return self._serial.data.timestamp
+        if self._mode == InputMode.NETWORK and self._network is not None:
+            return self._network.last_device_us
+        return 0
 
     def close(self) -> None:
         """Release resources held by the active backend."""
@@ -190,3 +272,5 @@ class InputManager:
             self._serial.close()
         if self._keyboard is not None:
             self._keyboard.close()
+        if self._network is not None:
+            self._network.close()

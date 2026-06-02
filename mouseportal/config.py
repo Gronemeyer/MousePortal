@@ -20,6 +20,7 @@ class InputMode(str, Enum):
     """Selects the active input source for corridor movement."""
     SERIAL = "serial"
     KEYBOARD = "keyboard"
+    NETWORK = "network"   # velocity pushed over a localhost UDP socket
 
 
 class TrialEndCondition(str, Enum):
@@ -95,10 +96,15 @@ class InputConfig:
     mode: InputMode = InputMode.KEYBOARD
     serial_port: str = "/dev/ttyUSB0"
     baud_rate: int = 57600
+    # NETWORK mode: where to listen for forwarded encoder datagrams.
+    host: str = "127.0.0.1"
+    udp_port: int = 8765
 
     def __post_init__(self) -> None:
         if self.baud_rate <= 0:
             raise ValueError(f"baud_rate must be positive: {self.baud_rate}")
+        if self.mode == InputMode.NETWORK and self.udp_port <= 0:
+            raise ValueError(f"udp_port must be positive: {self.udp_port}")
 
 
 @dataclass(frozen=True)

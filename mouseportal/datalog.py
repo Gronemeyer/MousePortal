@@ -37,6 +37,7 @@ class DataLogger:
         "position",
         "velocity",
         "effective_velocity",
+        "treadmill_device_us",
         "event",
     ]
 
@@ -79,6 +80,7 @@ class DataLogger:
         state: str = "",
         block: int = 0,
         trial: int = 0,
+        treadmill_device_us: int = 0,
         event: str = "",
     ) -> None:
         """Write one row of per-frame data."""
@@ -95,6 +97,7 @@ class DataLogger:
             "position": position,
             "velocity": velocity,
             "effective_velocity": effective_velocity,
+            "treadmill_device_us": treadmill_device_us,
             "event": event,
         }
         self._writer.writerow(row)

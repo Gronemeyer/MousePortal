@@ -36,11 +36,12 @@ class MousePortal(ShowBase):
       9. Register the single ``update`` task.
     """
 
-    def __init__(self, config_path: str) -> None:
+    def __init__(self, config_path: str, autostart: bool = False) -> None:
         super().__init__()
 
         # ---- 1. Config ------------------------------------------------
         self.cfg = PortalConfig.from_json(config_path)
+        self._autostart = autostart
 
         # ---- 2. Window ------------------------------------------------
         wp = WindowProperties()
@@ -131,6 +132,16 @@ class MousePortal(ShowBase):
 
         self.taskMgr.add(self._update, "updateTask")
 
+        # ---- 10. Autostart + readiness handshake ----------------------
+        # When driven by an external orchestrator (e.g. mesofield), begin the
+        # experiment immediately instead of waiting for a spacebar.
+        if self._autostart:
+            self.experiment.start()
+
+        # Stdout handshake token: the parent process waits for this line to
+        # know the corridor is up and accepting input (mirrors PsychoPy).
+        print("MOUSEPORTAL_READY", flush=True)
+
     # ─── Core loop ──────────────────────────────────────────────────────────
 
     def _update(self, task: Task) -> int:
@@ -173,6 +184,7 @@ class MousePortal(ShowBase):
             state=state.name,
             block=self.experiment.block,
             trial=self.experiment.trial,
+            treadmill_device_us=self.input.last_device_us,
         )
 
         # 6. Debug HUD.
@@ -333,6 +345,12 @@ def main() -> None:
         action="store_true",
         help="Write a default cfg.json to the current directory and exit",
     )
+    parser.add_argument(
+        "--autostart",
+        action="store_true",
+        help="Begin the experiment immediately instead of waiting for spacebar "
+             "(used when launched by an external orchestrator such as mesofield)",
+    )
     args = parser.parse_args()
 
     if args.init:
@@ -345,7 +363,7 @@ def main() -> None:
         return
 
     try:
-        app = MousePortal(args.config)
+        app = MousePortal(args.config, autostart=args.autostart)
     except (RuntimeError, ValueError) as exc:
         print(f"[MousePortal] startup error: {exc}", file=sys.stderr)
         sys.exit(1)
