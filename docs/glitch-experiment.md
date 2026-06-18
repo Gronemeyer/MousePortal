@@ -57,8 +57,8 @@ Copy this into the `"experiment"` section of `cfg.json`:
 Then run:
 
 ```bash
-python runportal.py                # uses cfg.json
-python runportal.py -c my_exp.json # uses a custom config
+mouseportal                  # uses cfg.json (or: python runportal.py)
+mouseportal -c my_exp.json   # uses a custom config
 ```
 
 Press **Space** to start the session. The state machine advances automatically
@@ -212,6 +212,7 @@ Per-frame CSV output (BIDS path: `data/sub-{id}/ses-{id}/beh/...`) includes:
 | `position` | Camera Y position |
 | `velocity` | Raw input velocity |
 | `effective_velocity` | Velocity after transform |
+| `treadmill_device_us` | Treadmill device microsecond clock (serial/network input; `0` for keyboard) — anchor for offline sync |
 | `event` | Discrete event markers (state transitions) |
 
 The difference between `velocity` and `effective_velocity` is the transform's
