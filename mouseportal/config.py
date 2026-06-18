@@ -36,6 +36,14 @@ class TrialEndCondition(str, Enum):
 class WindowConfig:
     width: int = 1920
     height: int = 1080
+    # Top-left position of the window in the OS virtual-desktop pixel space.
+    # On Windows, each monitor occupies a region of that shared space, so set
+    # (origin_x, origin_y) to the top-left pixel of the monitor you want the
+    # window to start on. To span two monitors, set width to the combined
+    # width (e.g. 3840) and origin to the left monitor's top-left corner.
+    # Leave as None to let the OS place the window.
+    origin_x: Optional[int] = None
+    origin_y: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.width <= 0 or self.height <= 0:
@@ -272,6 +280,8 @@ class PortalConfig:
             window=WindowConfig(
                 width=raw.get("window_width", 1920),
                 height=raw.get("window_height", 1080),
+                origin_x=raw.get("window_origin_x"),
+                origin_y=raw.get("window_origin_y"),
             ),
             corridor=CorridorConfig(
                 segment_length=raw.get("segment_length", 10.0),

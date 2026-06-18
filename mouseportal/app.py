@@ -46,6 +46,7 @@ class MousePortal(ShowBase):
         # ---- 2. Window ------------------------------------------------
         wp = WindowProperties()
         wp.setSize(self.cfg.window.width, self.cfg.window.height)
+        wp.setOrigin(self.cfg.window.origin_x, self.cfg.window.origin_y)
         self.win.requestProperties(wp)
         self.setFrameRateMeter(True)
         self.disableMouse()
