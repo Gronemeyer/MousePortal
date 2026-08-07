@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mouseportal"
+dynamic = ["version"]
+description = "Infinite corridor stimulus for Panda3D — rodent treadmill experiments"
+readme = "README.md"
+license = {text = "BSD-2-Clause"}
+requires-python = ">=3.11"
+authors = [
+    {name = "Jacob Gronemeyer"},
+]
+keywords = ["panda3d", "neuroscience", "virtual-reality", "corridor", "treadmill", "rodent"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "panda3d>=1.10.15,<1.11",
+    "pyserial",
+]
+
+[project.urls]
+Homepage = "https://github.com/Gronemeyer/MousePortal"
+Repository = "https://github.com/Gronemeyer/MousePortal"
+Issues = "https://github.com/Gronemeyer/MousePortal/issues"
+
+[project.scripts]
+mouseportal = "mouseportal.app:main"
+
+[tool.setuptools.packages.find]
+include = ["mouseportal*"]
+
+[tool.setuptools_scm]
+write_to = "mouseportal/_version.py"
+version_scheme = "guess-next-dev"
+local_scheme = "no-local-version"

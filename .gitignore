@@ -1,7 +1,15 @@
+/data
+**/*.pyi
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
+*.DS_Store
+
+# Auto-generated version file (setuptools-scm)
+mouseportal/_version.py
 
 # C extensions
 *.so
@@ -121,6 +129,8 @@ celerybeat.pid
 
 # Environments
 .env
+.release.env
+.pypirc
 .venv
 env/
 venv/
