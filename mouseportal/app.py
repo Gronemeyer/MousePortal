@@ -7,6 +7,8 @@ together and runs a single, short ``update`` task each frame.
 
 from __future__ import annotations
 
+import time
+
 from direct.showbase.ShowBase import ShowBase
 from direct.task.Task import Task
 from panda3d.core import TextNode, WindowProperties, LVecBase4f
@@ -17,6 +19,7 @@ from mouseportal.datalog import DataLogger
 from mouseportal.experiment import ExperimentState, ExperimentStateMachine
 from mouseportal.fog import FogEffect
 from mouseportal.input import InputManager
+from mouseportal.keytrigger import GlobalKeyWatcher
 from mouseportal.triggers import TriggerManager
 
 
@@ -36,12 +39,19 @@ class MousePortal(ShowBase):
       9. Register the single ``update`` task.
     """
 
-    def __init__(self, config_path: str, autostart: bool = False) -> None:
+    def __init__(
+        self,
+        config_path: str,
+        autostart: bool = False,
+        wait_trigger: bool = False,
+    ) -> None:
         super().__init__()
 
         # ---- 1. Config ------------------------------------------------
         self.cfg = PortalConfig.from_json(config_path)
         self._autostart = autostart
+        self._wait_trigger = wait_trigger
+        self._key_watcher: GlobalKeyWatcher | None = None
 
         # ---- 2. Window ------------------------------------------------
         wp = WindowProperties()
@@ -133,11 +143,25 @@ class MousePortal(ShowBase):
 
         self.taskMgr.add(self._update, "updateTask")
 
-        # ---- 10. Autostart + readiness handshake ----------------------
-        # When driven by an external orchestrator (e.g. mesofield), begin the
-        # experiment immediately instead of waiting for a spacebar.
+        # ---- 10. Start mode + readiness handshake ---------------------
+        # Driven by an external orchestrator (e.g. mesofield), MousePortal
+        # either begins immediately (``--autostart``) or holds frozen until the
+        # run's spacebar trigger (``--wait-trigger``).  In the latter case the
+        # press is watched globally: the operator's single press lands on
+        # mesofield's modal start dialog, which owns keyboard focus, so a
+        # focused-window binding alone would never see it.
         if self._autostart:
             self.experiment.start()
+        elif self._wait_trigger:
+            self.experiment.arm()
+            self._key_watcher = GlobalKeyWatcher()
+            if not self._key_watcher.available:
+                print(
+                    "[MousePortal] global key watch unavailable on this platform; "
+                    "the spacebar trigger requires the MousePortal window to have "
+                    "focus.",
+                    flush=True,
+                )
 
         # Stdout handshake token: the parent process waits for this line to
         # know the corridor is up and accepting input (mirrors PsychoPy).
@@ -148,6 +172,10 @@ class MousePortal(ShowBase):
     def _update(self, task: Task) -> int:
         """Per-frame update: input → experiment → move → recycle → log."""
         dt: float = globalClock.getDt()  # type: ignore[name-defined]
+
+        # 0. Global spacebar trigger (only while armed and waiting).
+        if self._key_watcher is not None and self._key_watcher.pressed():
+            self._on_trigger("global")
 
         # 1. Read velocity from the active input source.
         velocity: float = self.input.velocity
@@ -246,11 +274,41 @@ class MousePortal(ShowBase):
         self.data_logger.log_event(event_name, details)
 
     def _on_space(self) -> None:
-        """Space bar: start experiment or end current trial (manual mode)."""
-        if self.experiment.state == ExperimentState.IDLE:
+        """Space bar: fire the trigger, start, or end the current trial."""
+        if self.experiment.state == ExperimentState.WAITING_FOR_TRIGGER:
+            self._on_trigger("window")
+        elif self.experiment.state == ExperimentState.IDLE:
             self.experiment.start()
         elif self.experiment.state == ExperimentState.TRIAL_RUNNING:
             self.experiment.end_trial()
+
+    def _on_trigger(self, source: str) -> None:
+        """Record the trigger keypress and release the armed experiment.
+
+        The press is logged as a *frame* row rather than an event row: a frame
+        row carries ``treadmill_device_us``, so the press lands on the same
+        clock as the corridor samples and the mesofield cameras, and offline
+        alignment resolves it like any other frame.  An event row would only
+        carry wall-clock time, which is not on that clock.  The press time also
+        goes to stdout, where the parent process's log picks it up.
+
+        Ignored unless the experiment is armed and waiting.
+        """
+        if self.experiment.state != ExperimentState.WAITING_FOR_TRIGGER:
+            return
+        pressed_at = time.time()
+        self.data_logger.log_frame(
+            position=self._camera_position,
+            velocity=self.input.velocity,
+            state=self.experiment.state.name,
+            treadmill_device_us=self.input.last_device_us,
+            event=f"trigger.spacebar|{source}",
+        )
+        print(f"MOUSEPORTAL_TRIGGER {pressed_at:.6f} {source}", flush=True)
+        # Stop watching globally: from here a spacebar means "end trial", and
+        # that must only come from a press aimed at the MousePortal window.
+        self._key_watcher = None
+        self.experiment.start()
 
     def _toggle_debug_hud(self) -> None:
         """F1: toggle the on-screen debug overlay."""
@@ -310,6 +368,9 @@ class MousePortal(ShowBase):
             bar = "|" + "." * filled + " " * (bar_width - filled) + "|"
             return f"ITI         {bar} {exp.iti_elapsed:.1f} / {ecfg.iti_duration:.1f}s"
 
+        elif state == ExperimentState.WAITING_FOR_TRIGGER:
+            return "            ARMED — waiting for the [Space] trigger"
+
         elif state == ExperimentState.IDLE:
             return "            Press [Space] to begin"
 
@@ -346,11 +407,19 @@ def main() -> None:
         action="store_true",
         help="Write a default cfg.json to the current directory and exit",
     )
-    parser.add_argument(
+    start_mode = parser.add_mutually_exclusive_group()
+    start_mode.add_argument(
         "--autostart",
         action="store_true",
         help="Begin the experiment immediately instead of waiting for spacebar "
              "(used when launched by an external orchestrator such as mesofield)",
+    )
+    start_mode.add_argument(
+        "--wait-trigger",
+        action="store_true",
+        help="Hold the experiment frozen after the readiness handshake until a "
+             "spacebar press, which is detected even when another window (e.g. "
+             "mesofield's start dialog) has focus; the press time is logged",
     )
     args = parser.parse_args()
 
@@ -364,7 +433,11 @@ def main() -> None:
         return
 
     try:
-        app = MousePortal(args.config, autostart=args.autostart)
+        app = MousePortal(
+            args.config,
+            autostart=args.autostart,
+            wait_trigger=args.wait_trigger,
+        )
     except (RuntimeError, ValueError) as exc:
         print(f"[MousePortal] startup error: {exc}", file=sys.stderr)
         sys.exit(1)

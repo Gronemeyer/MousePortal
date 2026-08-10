@@ -3,7 +3,7 @@ Block-based experiment state machine.
 
 States
 ------
-IDLE → BLOCK_START → TRIAL_RUNNING → INTER_TRIAL_INTERVAL
+IDLE → (WAITING_FOR_TRIGGER) → BLOCK_START → TRIAL_RUNNING → INTER_TRIAL_INTERVAL
                                         ↓ (more trials)
                                     TRIAL_RUNNING
                                         ↓ (block done)
@@ -27,6 +27,7 @@ from mouseportal.transforms import VelocityTransform, IdentityTransform, build_t
 class ExperimentState(Enum):
     """Possible states for the experiment controller."""
     IDLE = auto()
+    WAITING_FOR_TRIGGER = auto()
     BLOCK_START = auto()
     TRIAL_RUNNING = auto()
     INTER_TRIAL_INTERVAL = auto()
@@ -71,9 +72,24 @@ class ExperimentStateMachine:
 
     # ─── Public API ─────────────────────────────────────────────────────────
 
+    def arm(self) -> None:
+        """Hold in ``WAITING_FOR_TRIGGER`` until :meth:`start` is called.
+
+        Distinct from ``IDLE``: idle is a free-run state where the corridor
+        still tracks the treadmill, whereas an armed experiment is frozen
+        waiting for the run's start trigger.  The transition is logged, so the
+        wait itself is visible in the CSV.
+        """
+        if self.state != ExperimentState.IDLE:
+            return
+        self._transition(ExperimentState.WAITING_FOR_TRIGGER)
+
     def start(self) -> None:
         """Begin the first block (call once to kick off the session)."""
-        if self.state != ExperimentState.IDLE:
+        if self.state not in (
+            ExperimentState.IDLE,
+            ExperimentState.WAITING_FOR_TRIGGER,
+        ):
             return
         self.block = 0
         self._begin_next_block()
@@ -98,7 +114,8 @@ class ExperimentStateMachine:
             self._tick_trial(dt, position)
         elif self.state == ExperimentState.INTER_TRIAL_INTERVAL:
             self._tick_iti(dt)
-        # IDLE, BLOCK_START, BLOCK_END, SESSION_COMPLETE: no-op per frame
+        # IDLE, WAITING_FOR_TRIGGER, BLOCK_START, BLOCK_END, SESSION_COMPLETE:
+        # no-op per frame
         return self.state
 
     @property

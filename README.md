@@ -56,7 +56,11 @@ A subject runs on a treadmill; encoder velocity drives a first-person camera dow
 - **Integration surface**: window size and origin are given in OS
   virtual-desktop coordinates for dual-monitor targeting. `--autostart` begins
   the session on launch, and a `MOUSEPORTAL_READY` token on stdout gives a
-  parent process (e.g. mesofield) a handshake signal.
+  parent process (e.g. mesofield) a handshake signal. `--wait-trigger` instead
+  holds the session frozen after that handshake until the run's spacebar
+  trigger, detected globally so the press need not land on the MousePortal
+  window; the press time is written to the CSV as a `trigger.spacebar` event
+  and echoed on stdout as `MOUSEPORTAL_TRIGGER <unix_time> <source>`.
 
 ### Infinite corridor
 
@@ -101,6 +105,7 @@ mouseportal                    # run with cfg.json (or: python runportal.py)
 mouseportal -c my.json         # custom config
 mouseportal --init             # write a default cfg.json
 mouseportal --autostart        # start immediately (for external orchestrators)
+mouseportal --wait-trigger     # hold until the spacebar trigger, and log its time
 ```
 
 In-app keys: **Space** start / end trial · **F1** toggle debug HUD · **Esc** quit.
