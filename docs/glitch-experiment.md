@@ -198,26 +198,161 @@ trials end automatically.
 
 ## Data Output
 
-Per-frame CSV output (BIDS path: `data/sub-{id}/ses-{id}/beh/...`) includes:
+A session writes four files under a shared stem
+(BIDS path: `data/sub-{id}/ses-{id}/beh/sub-{id}_ses-{id}_task-{task}_portal`):
 
-| Column | Description |
+| File | Grain |
 |---|---|
-| `timestamp` | Unix epoch (float) |
-| `datetime` | ISO-8601 UTC |
-| `frame` | Frame counter |
-| `state` | Experiment state (`IDLE`, `TRIAL_RUNNING`, `INTER_TRIAL_INTERVAL`, …) |
-| `block` | Current block (1-indexed) |
-| `trial` | Current trial within block (1-indexed) |
-| `condition` | Active condition label (e.g. `"normal"`, `"freeze"`) |
-| `position` | Camera Y position |
-| `velocity` | Raw input velocity |
-| `effective_velocity` | Velocity after transform |
-| `treadmill_device_us` | Treadmill device microsecond clock (serial/network input; `0` for keyboard) — anchor for offline sync |
-| `event` | Discrete event markers (state transitions) |
+| `…-samples.csv` | one row per rendered frame |
+| `…-events.csv` | one row per discrete event |
+| `…-trials.csv` | one row per completed trial |
+| `…-timing.json` | clock anchor, display settings, measured refresh |
+
+Absent values are written as `n/a`, which `pandas.read_csv` parses as `NaN`
+without arguments. Files are created exclusively — a rerun with the same
+subject/session raises rather than appending to the previous run.
+
+### `samples.csv`
+
+| Column | Unit | Description |
+|---|---|---|
+| `frame` | | Panda3D global frame count — the join key across all three tables |
+| `timestamp` | s | Unix epoch of the start of this frame |
+| `flip_timestamp` | s | Unix epoch immediately after the buffer swap returned |
+| `flip_wait` | s | Time blocked inside `flipFrame()` |
+| `frame_dt` | s | Interval between the previous two frame ticks |
+| `dropped` | | 1 when the flip interval exceeded the threshold |
+| `sync_level` | | Luminance commanded for the photodiode patch this frame |
+| `state` | | `IDLE`, `TRIAL_RUNNING`, `INTER_TRIAL_INTERVAL`, … |
+| `block` / `trial` | | 1-indexed; 0 before the session starts |
+| `condition` | | Active condition label |
+| `position` | corridor units | Camera Y position |
+| `velocity` | units/s | Raw input velocity |
+| `effective_velocity` | units/s | Velocity after the transform |
+| `treadmill_device_us` | µs | Device clock of the most recent encoder sample |
+| `treadmill_age` | s | How stale that sample was at this frame's start |
 
 The difference between `velocity` and `effective_velocity` is the transform's
 effect. For analysis, use `effective_velocity` to reconstruct visual flow and
 `velocity` to reconstruct the subject's locomotor behaviour.
+
+`treadmill_device_us` and `treadmill_age` are `n/a` in keyboard mode.
+
+### `events.csv`
+
+`timestamp`, `flip_timestamp`, `frame`, `block`, `trial`, `event`,
+`condition`, `value`.
+
+```
+timestamp        flip_timestamp   frame block trial event         condition value
+1786402577.6041  1786402577.6097  1     1     0     BLOCK_START   n/a       n/a
+1786402577.6041  1786402577.6097  1     1     1     TRIAL_START   invert    n/a
+1786402579.1059  1786402579.1114  154   1     1     TRIAL_END     invert    duration
+1786402579.1059  1786402579.1114  154   1     1     ITI_START     invert    n/a
+```
+
+Tokens: `SESSION_ARMED`, `SESSION_TRIGGER`, `BLOCK_START`, `TRIAL_START`,
+`TRIAL_END`, `ITI_START`, `BLOCK_END`, `SESSION_COMPLETE`. The set is open —
+`STIMULUS_ONSET`, `RESPONSE` and `REWARD` are reserved for paradigms that
+emit them, and need no schema change.
+
+`flip_timestamp` is `n/a` for events with no visual consequence (a trigger
+keypress, for instance): there is no presentation time to report.
+
+### `trials.csv`
+
+`block`, `trial`, `condition`, `transform`, `transform_params`,
+`start_timestamp`, `end_timestamp`, `duration`, `distance`, `end_rule`,
+`n_frames`, `n_dropped`, `mean_velocity`, `mean_effective_velocity`.
+
+Only `TRIAL_RUNNING` frames contribute to the aggregates; ITI frames belong
+to no trial.
+
+---
+
+## Timing and Synchronization
+
+### The timebase
+
+Every timestamp is derived from Panda3D's `globalClock`, which is backed by
+`QueryPerformanceCounter`: monotonic, ~100 ns resolution, and unaffected by
+NTP corrections mid-session. Its epoch is process start, so the session
+captures one Unix anchor at startup and reports
+
+```
+timestamp = unix_anchor + (clock - clock_anchor)
+```
+
+`time.time()` is used only to establish that anchor. On Windows it reports
+`GetSystemTimeAsFileTime`, nominal resolution 15.625 ms — coarser than a
+frame. The anchor is taken on a system-clock edge, and the observed tick is
+recorded as `anchor_residual` in `timing.json`. That residual bounds how far
+the *epoch mapping* can be off; precision *within* the session is not
+affected by it.
+
+### Presentation time
+
+`updateTask` runs at sort 0, before `igLoop` (sort 50) culls and draws. It
+stages the frame's values; `flipTask` at sort 55 completes the row:
+
+```
+readyFlip()   # blocks until the GPU has finished drawing
+t0 = clock
+flipFrame()   # the buffer swap; with vsync, returns at the vertical blank
+t1 = clock
+```
+
+`flip_timestamp` is `t1` and `flip_wait` is `t1 - t0`. This mirrors the
+pattern Panda uses internally for cluster sync. `readyFlip()` forces a
+one-pixel GPU readback, which costs throughput and buys a swap that is
+measured rather than inferred. Set `timing.explicit_flip` to `false` to skip
+it, in which case the swap happens at the start of the next frame's
+`render_frame()` and `flip_timestamp` no longer means what it says.
+
+Note that `flip_wait` is only the *tail* of the wait for vblank — some of it
+is absorbed by `readyFlip()`. A run at the monitor's refresh rate is the
+signal that vsync is working, not a large `flip_wait`.
+
+**`flip_timestamp` is a measured buffer swap, not a photon time.** The
+residual between them is fixed hardware latency, and measuring it needs a
+photodiode.
+
+### The photodiode patch
+
+With `sync_patch.enabled`, a luminance square is drawn in a screen corner and
+toggled every frame, and the level commanded for each frame is written to
+`sync_level`. A photodiode trace recorded alongside the session therefore
+decodes against that column: join the transitions to `frame`, regress the
+photodiode times on `flip_timestamp`, and the software-to-photon offset stops
+being an assumption.
+
+### Frame drops
+
+`dropped` is set when the flip interval exceeds
+`timing.dropped_frame_threshold` times the running median of observed
+intervals. The median adapts to whatever the window is actually running at,
+rather than trusting the display's nominal rate. Nothing is flagged until the
+first 120 intervals have established it.
+
+### Config
+
+```json
+"timing": {
+    "explicit_flip": true,
+    "sync_video": true,
+    "dropped_frame_threshold": 1.5
+},
+"sync_patch": {
+    "enabled": false,
+    "corner": "bottom-right",
+    "size": 0.08,
+    "high": 1.0,
+    "low": 0.0
+}
+```
+
+`sync_video` becomes the `sync-video` PRC variable, which is read when the
+window opens — so config is loaded before `ShowBase` is constructed.
 
 ---
 

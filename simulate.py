@@ -40,7 +40,8 @@ from mouseportal.config import (
     TrialCondition,
     TrialEndCondition,
 )
-from mouseportal.datalog import DataLogger
+from mouseportal.clock import FixedClock
+from mouseportal.datalog import NA, SessionLogger
 from mouseportal.experiment import ExperimentState, ExperimentStateMachine
 from mouseportal.transforms import VelocityTransform, build_transform
 
@@ -118,7 +119,7 @@ def run_simulation(
     verbose: bool = True,
 ) -> str:
     """
-    Run the glitch experiment headlessly and return the CSV path.
+    Run the glitch experiment headlessly and return the output stem.
 
     Parameters
     ----------
@@ -138,7 +139,7 @@ def run_simulation(
     Returns
     -------
     str
-        Absolute path to the generated CSV file.
+        Path stem the samples, events, trials and timing files hang off.
     """
     if seed is not None:
         random.seed(seed)
@@ -164,31 +165,39 @@ def run_simulation(
     # ── 2. Instantiate components ───────────────────────────────────────
     events_log: list[tuple[str, dict]] = []
 
-    def capture_event(name: str, details: dict) -> None:
-        events_log.append((name, details))
+    def capture_event(name: str, fields: dict) -> None:
+        events_log.append((name, fields))
 
     esm = ExperimentStateMachine(exp_cfg, send_event=capture_event)
 
-    csv_path = log_cfg.bids_path()
-    logger = DataLogger(csv_path)
+    dt: float = 1.0 / fps
+    wall_clock_start = time.time()
+    clock = FixedClock(unix_start=wall_clock_start, dt=dt)
+
+    stem = log_cfg.stem()
+    logger = SessionLogger(
+        stem,
+        header={
+            "clock": clock.describe(),
+            "display": {
+                "sync_video": None,
+                "explicit_flip": None,
+                "dropped_frame_threshold": 1.5,
+                "reported_refresh_hz": fps,
+                "window_size": None,
+            },
+            "sync_patch": {"enabled": False},
+            "software": {"panda3d": None, "mouseportal": "simulated"},
+        },
+        dropped_frame_threshold=1.5,
+    )
+    csv_path = f"{stem}-samples.csv"
 
     mouse = VirtualMouse(loco_params)
 
-    dt: float = 1.0 / fps
     position: float = 0.0
     frame: int = 0
-    wall_clock_start = time.time()
-
-    # Patch time.time so the DataLogger writes simulated timestamps
-    # rather than real wall-clock time (the sim runs in milliseconds).
-    _real_time = time.time
-    _sim_epoch = _real_time()
-    _sim_clock = [_sim_epoch]  # mutable container for closure
-
-    def _fake_time() -> float:
-        return _sim_clock[0]
-
-    time.time = _fake_time
+    trial_start_ts: float = 0.0
 
     if verbose:
         total_trials = exp_cfg.num_blocks * exp_cfg.trials_per_block
@@ -209,7 +218,8 @@ def run_simulation(
 
     while frame < max_frames:
         frame += 1
-        _sim_clock[0] = _sim_epoch + frame * dt  # advance simulated clock
+        clock.step()
+        timestamp = clock.unix(clock.frame_time())
 
         # a) synthetic velocity
         raw_velocity = mouse.step(dt)
@@ -217,28 +227,62 @@ def run_simulation(
         # b) tick experiment
         state = esm.tick(dt, position)
 
-        # c) apply transform & move
+        # c) apply transform & move — the same gate the live app uses
         effective_velocity = raw_velocity
         move = 0.0
-        if state in (ExperimentState.TRIAL_RUNNING, ExperimentState.IDLE):
+        if state in (
+            ExperimentState.TRIAL_RUNNING,
+            ExperimentState.IDLE,
+            ExperimentState.INTER_TRIAL_INTERVAL,
+        ):
             effective_velocity = esm.apply_transform(raw_velocity, dt, position)
             move = effective_velocity * dt
             position += move
 
-        # d) log frame
-        logger.log_frame(
-            position=position,
-            velocity=raw_velocity,
-            effective_velocity=effective_velocity,
-            condition=esm.condition.label,
-            state=state.name,
-            block=esm.block,
-            trial=esm.trial,
-        )
+        # d) sample row. The simulated flip lands one frame period after the
+        # frame starts, which is what a vsynced run without drops looks like.
+        logger.write_sample({
+            "frame": frame,
+            "timestamp": timestamp,
+            "flip_timestamp": timestamp + dt,
+            "flip_wait": NA,
+            "frame_dt": dt,
+            "dropped": 0,
+            "sync_level": NA,
+            "state": state.name,
+            "block": esm.block,
+            "trial": esm.trial,
+            "condition": esm.condition.label,
+            "position": position,
+            "velocity": raw_velocity,
+            "effective_velocity": effective_velocity,
+            "treadmill_device_us": NA,
+            "treadmill_age": NA,
+        })
 
-        # e) flush any experiment events accumulated this frame
-        for evt_name, evt_details in events_log:
-            logger.log_event(evt_name, evt_details)
+        # e) flush this frame's events, and close out any trial that ended
+        for evt_name, fields in events_log:
+            logger.write_event({
+                "timestamp": timestamp,
+                "flip_timestamp": timestamp + dt,
+                "frame": frame,
+                "block": fields["block"],
+                "trial": fields["trial"],
+                "event": evt_name,
+                "condition": fields["condition"] if fields["condition"] is not None else NA,
+                "value": fields["value"] if fields["value"] is not None else NA,
+            })
+            if evt_name == "TRIAL_START":
+                trial_start_ts = timestamp
+            elif evt_name == "TRIAL_END":
+                row = esm.trial_summary()
+                row["start_timestamp"] = trial_start_ts
+                row["end_timestamp"] = timestamp
+                row["n_frames"] = logger.trial.n_frames
+                row["n_dropped"] = logger.trial.n_dropped
+                row["mean_velocity"] = logger.trial.mean_velocity
+                row["mean_effective_velocity"] = logger.trial.mean_effective_velocity
+                logger.write_trial(row)
         events_log.clear()
 
         # f) progress
@@ -256,9 +300,8 @@ def run_simulation(
             break
 
     # ── 5. Clean up ─────────────────────────────────────────────────────
-    time.time = _real_time  # restore real time.time
     logger.close()
-    wall_elapsed = _real_time() - wall_clock_start
+    wall_elapsed = time.time() - wall_clock_start
     sim_time = frame * dt
 
     if verbose:
@@ -266,9 +309,9 @@ def run_simulation(
         print(f"[simulate] Done.")
         print(f"[simulate] Simulated time : {sim_time:.1f}s  ({frame} frames)")
         print(f"[simulate] Wall-clock     : {wall_elapsed:.2f}s")
-        print(f"[simulate] CSV written to : {csv_path}")
+        print(f"[simulate] Written to     : {stem}-{{samples,events,trials}}.csv")
 
-    return csv_path
+    return stem
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────
@@ -321,7 +364,7 @@ def main() -> None:
 
     loco = LocomotionParams(mean_speed=args.mean_speed, sigma=args.sigma)
 
-    csv_path = run_simulation(
+    run_simulation(
         config_path=args.config,
         fps=args.fps,
         seed=args.seed,

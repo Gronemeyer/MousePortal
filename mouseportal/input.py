@@ -18,6 +18,8 @@ import serial
 from direct.showbase import DirectObject
 from direct.task.Task import Task
 
+from mouseportal.clock import SessionClock
+
 from mouseportal.config import InputConfig, InputMode
 
 if TYPE_CHECKING:
@@ -28,10 +30,17 @@ if TYPE_CHECKING:
 
 @dataclass
 class EncoderData:
-    """A single rotary-encoder reading from the treadmill hardware."""
+    """A single rotary-encoder reading from the treadmill hardware.
+
+    ``timestamp`` is the device's own microsecond clock.  ``received`` is the
+    session clock reading when this sample reached MousePortal — both backends
+    keep only the latest sample, so without it the age of the value a frame
+    used would be unknowable.
+    """
     timestamp: int = 0
     distance: float = 0.0
     speed: float = 0.0
+    received: Optional[float] = None
 
     def __repr__(self) -> str:
         return (
@@ -77,11 +86,12 @@ class _SerialBackend(DirectObject.DirectObject):
     ``self.data`` and broadcast via the messenger.
     """
 
-    def __init__(self, port: str, baud: int, messenger: Any) -> None:
+    def __init__(self, port: str, baud: int, messenger: Any, clock: SessionClock) -> None:
         super().__init__()
         self._port = port
         self._baud = baud
         self._messenger = messenger
+        self._clock = clock
         self.data = EncoderData()
 
         try:
@@ -98,10 +108,12 @@ class _SerialBackend(DirectObject.DirectObject):
     def read_serial_task(self, task: Task) -> int:
         """Per-frame task: read one line from the serial port."""
         raw = self._serial.readline()
+        received = self._clock.now()
         line = raw.decode("utf-8", errors="replace").strip()
         if line:
             data = self._parse_line(line)
             if data is not None:
+                data.received = received
                 self._messenger.send("readSerial", [data])
         return Task.cont
 
@@ -126,12 +138,13 @@ class _NetworkBackend:
     Mesofield owns the treadmill serial port and forwards each parsed sample
     (``device_us,distance,speed``) as a UDP datagram so MousePortal and the
     acquisition system never contend for the port.  A daemon thread keeps the
-    latest reading in ``self.data``; ``last_device_us`` exposes the device
-    microsecond clock used for offline synchronisation with the cameras.
+    latest reading in ``self.data``, stamped with its arrival time so a frame
+    can report how stale the value it used was.
     """
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, clock: SessionClock) -> None:
         self.data = EncoderData()
+        self._clock = clock
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -155,20 +168,18 @@ class _NetworkBackend:
                 continue
             except OSError:
                 break
+            received = self._clock.now()
             line = raw.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
             data = parse_encoder_csv(line)
             if data is not None:
+                data.received = received
                 self.data = data
 
     @property
     def velocity(self) -> float:
         return self.data.speed
-
-    @property
-    def last_device_us(self) -> int:
-        return self.data.timestamp
 
     def close(self) -> None:
         self._stop.set()
@@ -224,6 +235,7 @@ class InputManager:
         base: "ShowBase",
         cfg: InputConfig,
         speed_scaling: float,
+        clock: SessionClock,
         keyboard_speed: float = 20.0,
     ) -> None:
         self._mode = cfg.mode
@@ -232,12 +244,14 @@ class InputManager:
         self._network: Optional[_NetworkBackend] = None
 
         if self._mode == InputMode.SERIAL:
-            self._serial = _SerialBackend(cfg.serial_port, cfg.baud_rate, base.messenger)
+            self._serial = _SerialBackend(
+                cfg.serial_port, cfg.baud_rate, base.messenger, clock,
+            )
             base.taskMgr.add(self._serial.read_serial_task, "readSerialTask")
         elif self._mode == InputMode.KEYBOARD:
             self._keyboard = _KeyboardBackend(base, keyboard_speed)
         elif self._mode == InputMode.NETWORK:
-            self._network = _NetworkBackend(cfg.host, cfg.udp_port)
+            self._network = _NetworkBackend(cfg.host, cfg.udp_port, clock)
         else:
             raise ValueError(f"Unknown input mode: {self._mode}")
 
@@ -253,18 +267,19 @@ class InputManager:
         return 0.0
 
     @property
-    def last_device_us(self) -> int:
-        """Latest treadmill device microsecond timestamp (0 if unavailable).
+    def last_sample(self) -> Optional[EncoderData]:
+        """The most recent encoder reading, or ``None`` in keyboard mode.
 
-        Only the serial and network backends carry a device clock; this is
-        the anchor MousePortal logs per frame for offline synchronisation
-        with the mesofield cameras.
+        Carries the device microsecond clock MousePortal logs per frame for
+        offline synchronisation with the mesofield cameras, and the session
+        clock reading at which it arrived.  Only the serial and network
+        backends have one.
         """
         if self._mode == InputMode.SERIAL and self._serial is not None:
-            return self._serial.data.timestamp
+            return self._serial.data
         if self._mode == InputMode.NETWORK and self._network is not None:
-            return self._network.last_device_us
-        return 0
+            return self._network.data
+        return None
 
     def close(self) -> None:
         """Release resources held by the active backend."""

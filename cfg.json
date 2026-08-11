@@ -55,5 +55,17 @@
         "session": "01",
         "task": "corridor",
         "output_dir": "data"
+    },
+    "timing": {
+        "explicit_flip": true,
+        "sync_video": true,
+        "dropped_frame_threshold": 1.5
+    },
+    "sync_patch": {
+        "enabled": false,
+        "corner": "bottom-right",
+        "size": 0.08,
+        "high": 1.0,
+        "low": 0.0
     }
 }

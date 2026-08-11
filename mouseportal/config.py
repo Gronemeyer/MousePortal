@@ -192,12 +192,58 @@ class TriggerConfig:
 
 
 @dataclass(frozen=True)
+class TimingConfig:
+    """How presentation time is measured.
+
+    ``explicit_flip`` makes MousePortal call ``readyFlip()`` then
+    ``flipFrame()`` itself in a task after ``igLoop``, bracketed by clock
+    reads, instead of letting the swap happen at the start of the next frame's
+    ``render_frame()``.  ``readyFlip`` forces a GPU sync (a one-pixel readback)
+    so the measured swap is real; the cost is throughput.
+
+    ``sync_video`` is applied as a PRC variable before the window opens, so it
+    must be resolved from config before ``ShowBase`` is constructed.
+    """
+    explicit_flip: bool = True
+    sync_video: bool = True
+    dropped_frame_threshold: float = 1.5   # x the measured refresh interval
+
+    def __post_init__(self) -> None:
+        if self.dropped_frame_threshold <= 1.0:
+            raise ValueError(
+                f"dropped_frame_threshold must exceed 1.0: {self.dropped_frame_threshold}"
+            )
+
+
+@dataclass(frozen=True)
+class SyncPatchConfig:
+    """Photodiode patch geometry and levels.
+
+    ``size`` is a fraction of the screen; ``high``/``low`` are luminances in
+    [0, 1] and are what gets written to the ``sync_level`` column.
+    """
+    enabled: bool = False
+    corner: str = "bottom-right"
+    size: float = 0.08
+    high: float = 1.0
+    low: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.corner not in ("top-left", "top-right", "bottom-left", "bottom-right"):
+            raise ValueError(f"sync_patch.corner must be a screen corner: {self.corner}")
+        if not 0.0 < self.size <= 0.5:
+            raise ValueError(f"sync_patch.size must be in (0, 0.5]: {self.size}")
+        if not (0.0 <= self.low <= 1.0 and 0.0 <= self.high <= 1.0):
+            raise ValueError(f"sync_patch levels must be in [0,1]: {self.low}, {self.high}")
+
+
+@dataclass(frozen=True)
 class LoggingConfig:
     subject: str = ""     # e.g. "001"
     session: str = ""     # e.g. "01"
     task: str = ""        # e.g. "corridor"
     output_dir: str = "data"  # root output directory (standalone use)
-    output_path: str = ""     # explicit full CSV path (overrides BIDS layout)
+    output_path: str = ""     # explicit output stem (overrides BIDS layout)
 
     def __post_init__(self) -> None:
         if not self.subject:
@@ -207,25 +253,29 @@ class LoggingConfig:
         if not self.task:
             raise ValueError("logging.task must be set (e.g. 'corridor')")
 
-    def bids_path(self) -> str:
+    def stem(self) -> str:
         """
-        Resolve the output CSV path.
+        Resolve the output path stem that all streams hang off.
 
-        If ``output_path`` is set (e.g. an orchestrator such as mesofield owns
-        path construction and hands MousePortal the exact file), it is used
-        verbatim — MousePortal does NOT build its own directory layout.
-        Otherwise a BIDS-compliant path is built under ``output_dir`` for
-        standalone use, e.g.
-        ``data/sub-001/ses-01/beh/sub-001_ses-01_task-corridor_portal.csv``.
+        If ``output_path`` is set (an orchestrator such as mesofield owns path
+        construction and hands MousePortal the location), it is used verbatim
+        with any ``.csv`` suffix stripped — MousePortal does NOT build its own
+        directory layout.  Otherwise a BIDS-style stem is built under
+        ``output_dir`` for standalone use, e.g.
+        ``data/sub-001/ses-01/beh/sub-001_ses-01_task-corridor_portal``.
         """
         if self.output_path:
-            return self.output_path
+            return self.output_path[:-4] if self.output_path.endswith(".csv") else self.output_path
         import os
         sub = f"sub-{self.subject}"
         ses = f"ses-{self.session}"
         beh_dir = os.path.join(self.output_dir, sub, ses, "beh")
-        filename = f"{sub}_{ses}_task-{self.task}_portal.csv"
-        return os.path.join(beh_dir, filename)
+        return os.path.join(beh_dir, f"{sub}_{ses}_task-{self.task}_portal")
+
+    def stream_path(self, stream: str) -> str:
+        """Path for one output stream: ``samples``, ``events``, ``trials``, ``timing``."""
+        suffix = "json" if stream == "timing" else "csv"
+        return f"{self.stem()}-{stream}.{suffix}"
 
 
 # ─── Top-level config ───────────────────────────────────────────────────────
@@ -241,6 +291,8 @@ class PortalConfig:
     experiment: ExperimentConfig = field(default_factory=ExperimentConfig)
     triggers: TriggerConfig = field(default_factory=TriggerConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    timing: TimingConfig = field(default_factory=TimingConfig)
+    sync_patch: SyncPatchConfig = field(default_factory=SyncPatchConfig)
 
     # ─── Loaders ────────────────────────────────────────────────────────
     @classmethod
@@ -271,6 +323,8 @@ class PortalConfig:
             experiment=ExperimentConfig(**_parse_experiment(raw.get("experiment", {}))),
             triggers=TriggerConfig(**raw.get("triggers", {})),
             logging=LoggingConfig(**raw.get("logging", {"subject": "000", "session": "00", "task": "portal"})),
+            timing=TimingConfig(**raw.get("timing", {})),
+            sync_patch=SyncPatchConfig(**raw.get("sync_patch", {})),
         )
 
     @classmethod

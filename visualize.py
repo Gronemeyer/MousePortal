@@ -32,7 +32,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -93,19 +93,17 @@ _STATE_COLORS: Dict[str, str] = {
 # ── Data loading & preprocessing ──────────────────────────────────────────
 
 
-def load_data(csv_path: str) -> pd.DataFrame:
-    """Load a MousePortal CSV and add derived columns."""
-    df = pd.read_csv(csv_path)
+def resolve_stem(path: str) -> str:
+    """Accept either the output stem or any one of the session's files."""
+    for suffix in ("-samples.csv", "-events.csv", "-trials.csv", "-timing.json"):
+        if path.endswith(suffix):
+            return path[: -len(suffix)]
+    return path
 
-    # Keep only per-frame rows (have a numeric position).
-    df = df[df["position"].apply(lambda x: _is_number(x))].copy()
-    df["position"] = df["position"].astype(float)
-    df["velocity"] = df["velocity"].astype(float)
-    df["effective_velocity"] = df["effective_velocity"].astype(float)
-    df["timestamp"] = df["timestamp"].astype(float)
-    df["frame"] = df["frame"].astype(int)
-    df["block"] = df["block"].astype(int)
-    df["trial"] = df["trial"].astype(int)
+
+def load_data(stem: str) -> pd.DataFrame:
+    """Load the samples table and add derived columns."""
+    df = pd.read_csv(f"{stem}-samples.csv")
 
     # Elapsed time from session start.
     t0 = df["timestamp"].iloc[0]
@@ -124,41 +122,39 @@ def load_data(csv_path: str) -> pd.DataFrame:
     return df
 
 
-def _is_number(x: Any) -> bool:
-    try:
-        float(x)
-        return True
-    except (ValueError, TypeError):
-        return False
+def load_events(stem: str) -> pd.DataFrame:
+    return pd.read_csv(f"{stem}-events.csv")
+
+
+def load_trials(stem: str) -> pd.DataFrame:
+    return pd.read_csv(f"{stem}-trials.csv")
 
 
 # ── Per-trial summary ─────────────────────────────────────────────────────
 
 
-def trial_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate per-trial statistics."""
-    trials = (
+def trial_summary(df: pd.DataFrame, trials: pd.DataFrame, t0: float) -> pd.DataFrame:
+    """Combine the trials table with the velocity spread the samples carry.
+
+    Duration, distance and the means come from the trials table, which the
+    session wrote as it ran.  Standard deviations are computed here because
+    the trials table does not carry them.
+    """
+    ts = trials.rename(columns={
+        "mean_velocity": "mean_raw_vel",
+        "mean_effective_velocity": "mean_eff_vel",
+    }).copy()
+    ts["start_time"] = ts["start_timestamp"] - t0
+    ts["end_time"] = ts["end_timestamp"] - t0
+    ts["trial_id"] = ts["block"].astype(str) + "-" + ts["trial"].astype(str)
+
+    spread = (
         df[df["state"] == "TRIAL_RUNNING"]
-        .groupby(["block", "trial", "condition"], sort=False)
-        .agg(
-            start_time=("time", "first"),
-            end_time=("time", "last"),
-            start_pos=("position", "first"),
-            end_pos=("position", "last"),
-            mean_raw_vel=("velocity", "mean"),
-            std_raw_vel=("velocity", "std"),
-            mean_eff_vel=("effective_velocity", "mean"),
-            std_eff_vel=("effective_velocity", "std"),
-            n_frames=("frame", "count"),
-        )
+        .groupby(["block", "trial"], sort=False)
+        .agg(std_raw_vel=("velocity", "std"), std_eff_vel=("effective_velocity", "std"))
         .reset_index()
     )
-    trials["duration"] = trials["end_time"] - trials["start_time"]
-    trials["distance"] = (trials["end_pos"] - trials["start_pos"]).abs()
-    trials["trial_id"] = (
-        trials["block"].astype(str) + "-" + trials["trial"].astype(str)
-    )
-    return trials
+    return ts.merge(spread, on=["block", "trial"], how="left")
 
 
 # ── Plotting ──────────────────────────────────────────────────────────────
@@ -608,13 +604,13 @@ def main() -> None:
         description="Visualise MousePortal simulation / session data",
     )
     parser.add_argument(
-        "csv",
-        help="Path to the per-frame CSV file",
+        "session",
+        help="Session output stem, or any one of its -samples/-events/-trials files",
     )
     parser.add_argument(
         "-o", "--output-dir",
         default=None,
-        help="Directory to save the figure (default: same dir as CSV)",
+        help="Directory to save the figure (default: same dir as the session)",
     )
     parser.add_argument(
         "--no-show",
@@ -629,25 +625,25 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    csv_path = args.csv
-    if not os.path.isfile(csv_path):
-        print(f"[visualize] File not found: {csv_path}", file=sys.stderr)
+    session = resolve_stem(args.session)
+    if not os.path.isfile(f"{session}-samples.csv"):
+        print(f"[visualize] No samples file for: {session}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"[visualize] Loading: {csv_path}")
-    df = load_data(csv_path)
-    print(f"[visualize] Loaded {len(df)} frames")
+    print(f"[visualize] Loading: {session}")
+    df = load_data(session)
+    trials = load_trials(session)
+    print(f"[visualize] Loaded {len(df)} frames, {len(trials)} trials")
 
-    ts = trial_summary(df)
+    ts = trial_summary(df, trials, t0=df["timestamp"].iloc[0])
     print_summary(ts)
 
-    fig = plot_session(df, ts, title=f"MousePortal — {Path(csv_path).stem}")
+    fig = plot_session(df, ts, title=f"MousePortal — {Path(session).name}")
 
     # Save figure.
-    out_dir = args.output_dir or os.path.dirname(csv_path) or "."
+    out_dir = args.output_dir or os.path.dirname(session) or "."
     os.makedirs(out_dir, exist_ok=True)
-    stem = Path(csv_path).stem
-    fig_path = os.path.join(out_dir, f"{stem}_analysis.png")
+    fig_path = os.path.join(out_dir, f"{Path(session).name}_analysis.png")
     fig.savefig(fig_path, dpi=args.dpi, bbox_inches="tight")
     print(f"[visualize] Figure saved: {fig_path}")
 

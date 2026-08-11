@@ -32,26 +32,49 @@ A subject runs on a treadmill; encoder velocity drives a first-person camera dow
   and stateful ones (`noisy`, and `delay`) share call signature and a `reset()`
   at trial onset, A string-keyed registry (`build_transform`) constructs them from JSON.
 
-- **Per-frame CSV logging**: one flat table carrying continuous samples and
-  discrete events under a fixed schema. Paths follow BIDS
-  (`sub-<id>/ses-<id>/beh/..._portal.csv`), and an orchestrator can hand over an
-  explicit `output_path` to use verbatim. An `on_row` hook exposes the same rows
-  for live streaming.
+- **Three-table logging**: continuous samples, discrete events, and trial
+  summaries in separate files, each with a schema where every column applies to
+  every row. Paths follow BIDS (`sub-<id>/ses-<id>/beh/..._portal-*.csv`), and
+  an orchestrator can hand over an explicit `output_path` to use as the stem. An
+  `on_row` hook exposes the same rows for live streaming. Absent values are
+  `n/a`, which pandas reads as `NaN`.
 
-  | timestamp | datetime | frame | state | block | trial | condition | position | velocity | effective_velocity | treadmill_device_us | event |
-  |---|---|---|---|---|---|---|---|---|---|---|---|
-  | 1775174683.4671 | 2026-04-03T00:04:43.467092+00:00 | 900 | | 0 | 0 | | | | | | `experiment.TRIAL_RUNNING\|{'from': 'BLOCK_START', 'to': 'TRIAL_RUNNING', 'block': 1, 'trial': 1, 'condition': 'normal', 'transform': 'identity'}` |
-  | 1775174683.4756 | 2026-04-03T00:04:43.475640+00:00 | 901 | TRIAL_RUNNING | 1 | 1 | normal | 47.650166 | 20.0 | 20.0 | 41230118 | |
-  | 1775174683.4923 | 2026-04-03T00:04:43.492301+00:00 | 902 | TRIAL_RUNNING | 1 | 1 | normal | 47.983499 | 20.0 | 20.0 | 41246785 | |
-  | 1775174691.1082 | 2026-04-03T00:04:51.108214+00:00 | 1358 | TRIAL_RUNNING | 1 | 2 | glitch_gain | 152.114832 | 19.4 | 38.8 | 48862351 | |
-  | 1775174691.1249 | 2026-04-03T00:04:51.124881+00:00 | 1359 | TRIAL_RUNNING | 1 | 2 | glitch_gain | 152.761498 | 19.4 | 38.8 | 48879018 | |
+  `…-samples.csv` — one row per rendered frame:
+
+  | frame | timestamp | flip_timestamp | flip_wait | dropped | state | block | trial | condition | position | velocity | effective_velocity | treadmill_device_us | treadmill_age |
+  |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+  | 901 | 1775174683.4756 | 1775174683.4817 | 0.000188 | 0 | TRIAL_RUNNING | 1 | 1 | normal | 47.650166 | 20.0 | 20.0 | 41230118 | 0.0031 |
+  | 902 | 1775174683.4817 | 1775174683.4878 | 0.000174 | 0 | TRIAL_RUNNING | 1 | 1 | normal | 47.983499 | 20.0 | 20.0 | 41246785 | 0.0028 |
+
+  `…-events.csv` — one row per discrete event, in long format:
+
+  | timestamp | flip_timestamp | frame | block | trial | event | condition | value |
+  |---|---|---|---|---|---|---|---|
+  | 1775174691.1082 | 1775174691.1143 | 1358 | 1 | 2 | TRIAL_START | gain_2x | n/a |
+  | 1775174694.1149 | 1775174694.1210 | 1855 | 1 | 2 | TRIAL_END | gain_2x | distance |
+
+  `…-trials.csv` adds one row per completed trial (duration, distance, end rule,
+  frame and drop counts, velocity means), and `…-timing.json` carries the clock
+  anchor, display settings, and measured refresh interval.
 
   `velocity` is what the treadmill reported and `effective_velocity` is what the
   camera moved on, so the per-frame manipulation is recoverable from the record.
   `treadmill_device_us` is the encoder's own microsecond clock, the anchor for
-  aligning the corridor against imaging offline. Event rows share the frame
-  counter and clock with the samples around them, which places every transition
-  in the same timeline as the movement.
+  aligning the corridor against imaging offline, and `treadmill_age` says how
+  stale that reading was when the frame used it. Events carry the `frame` of the
+  sample row they belong to, which places every transition in the same timeline
+  as the movement.
+
+- **Explicit presentation timing**: all timestamps come from Panda3D's
+  QPC-backed `globalClock` and are mapped onto the Unix epoch through a single
+  anchor recorded in the sidecar, so rows are epoch-comparable without
+  inheriting `time.time()`'s 15.6 ms Windows resolution or its NTP steps. A task
+  at sort 55 brackets `readyFlip()`/`flipFrame()` with clock reads, so
+  `flip_timestamp` is a measured buffer swap rather than an inferred one, and
+  frame drops are flagged against the running median flip interval. An optional
+  photodiode patch logs its commanded luminance per frame, which is what turns
+  the software-to-photon offset into something measurable. See
+  [docs/glitch-experiment.md](docs/glitch-experiment.md) for the full model.
 
 - **Integration surface**: window size and origin are given in OS
   virtual-desktop coordinates for dual-monitor targeting. `--autostart` begins
@@ -59,8 +82,9 @@ A subject runs on a treadmill; encoder velocity drives a first-person camera dow
   parent process (e.g. mesofield) a handshake signal. `--wait-trigger` instead
   holds the session frozen after that handshake until the run's spacebar
   trigger, detected globally so the press need not land on the MousePortal
-  window; the press time is written to the CSV as a `trigger.spacebar` event
-  and echoed on stdout as `MOUSEPORTAL_TRIGGER <unix_time> <source>`.
+  window; the press is written to the events table as `SESSION_TRIGGER` and
+  echoed on stdout as `MOUSEPORTAL_TRIGGER <unix_time> <source>` — the same
+  timestamp in both places.
 
 ### Infinite corridor
 
@@ -113,9 +137,11 @@ In-app keys: **Space** start / end trial · **F1** toggle debug HUD · **Esc** q
 ### Simulate & visualize (no graphics)
 
 ```bash
-python simulate.py -c cfg.json --seed 42      # synthetic mouse → CSV
-python visualize.py data/.../sub-001_..._portal.csv   # 6-panel analysis figure
+python simulate.py -c cfg.json --seed 42      # synthetic mouse → the three tables
+python visualize.py data/.../sub-001_..._portal   # 6-panel analysis figure
 ```
+
+`visualize.py` takes the session stem, or any one of its files.
 
 ## Configuration
 
@@ -130,7 +156,9 @@ Config is a nested JSON file (see [cfg.json](cfg.json)) with these sections:
 | `input` | `mode` (`keyboard`/`serial`/`network`), serial port/baud, UDP host/port |
 | `experiment` | Blocks, trials, ITI, end condition, `conditions` + `block_conditions` |
 | `triggers` | Optional serial trigger output |
-| `logging` | `subject`/`session`/`task` (BIDS) or explicit `output_path` |
+| `logging` | `subject`/`session`/`task` (BIDS) or explicit `output_path` stem |
+| `timing` | `explicit_flip`, `sync_video`, `dropped_frame_threshold` |
+| `sync_patch` | Photodiode patch corner, size, and luminance levels |
 
 Each `condition` selects a velocity transform and optional per-condition trial-end overrides; `block_conditions` define the per-trial sequence of condition labels for each block.
 
@@ -144,11 +172,13 @@ mouseportal/
   corridor.py     # infinite corridor geometry & recycling
   experiment.py   # block/trial state machine
   transforms.py   # velocity transforms (glitch mechanism)
-  datalog.py      # CSV logger (per-frame + events)
+  datalog.py      # samples / events / trials tables + timing sidecar
+  clock.py        # monotonic timebase with a Unix epoch anchor
+  syncpatch.py    # photodiode luminance patch
   fog.py, zones.py, triggers.py
 runportal.py      # thin launcher
 simulate.py       # headless experiment runner
-visualize.py      # CSV → analysis figure
+visualize.py      # session → analysis figure
 docs/glitch-experiment.md
 ```
 

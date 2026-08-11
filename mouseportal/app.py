@@ -7,20 +7,25 @@ together and runs a single, short ``update`` task each frame.
 
 from __future__ import annotations
 
-import time
-
 from direct.showbase.ShowBase import ShowBase
 from direct.task.Task import Task
-from panda3d.core import TextNode, WindowProperties, LVecBase4f
+from panda3d.core import TextNode, WindowProperties, LVecBase4f, loadPrcFileData
 
+from mouseportal.clock import SessionClock
 from mouseportal.config import PortalConfig, TrialEndCondition
 from mouseportal.corridor import Corridor
-from mouseportal.datalog import DataLogger
+from mouseportal.datalog import NA, SessionLogger
 from mouseportal.experiment import ExperimentState, ExperimentStateMachine
 from mouseportal.fog import FogEffect
 from mouseportal.input import InputManager
 from mouseportal.keytrigger import GlobalKeyWatcher
+from mouseportal.syncpatch import SyncPatch
 from mouseportal.triggers import TriggerManager
+
+# Task sorts. ShowBase runs igLoop (cull, draw, and — with auto-flip off — the
+# previous frame's swap) at 50 and audioLoop at 60.
+UPDATE_SORT = 0
+FLIP_SORT = 55
 
 
 class MousePortal(ShowBase):
@@ -28,27 +33,32 @@ class MousePortal(ShowBase):
     Main application for the infinite corridor stimulus.
 
     Construction sequence:
-      1. Load & validate config (fail-fast).
+      1. Session clock (anchors the timebase before anything is logged).
       2. Set window properties.
-      3. Create input manager (serial or keyboard).
+      3. Create input manager (serial, network, or keyboard).
       4. Build corridor geometry.
       5. Apply fog.
       6. Initialise experiment state machine.
       7. Initialise trigger manager.
-      8. Open data logger.
-      9. Register the single ``update`` task.
+      8. Open session logger.
+      9. Register the ``update`` and ``flip`` tasks.
+
+    Config is loaded by :func:`main` rather than here: ``sync-video`` is a PRC
+    variable that must be set before the window opens, so it has to be resolved
+    before ``ShowBase.__init__`` runs.
     """
 
     def __init__(
         self,
-        config_path: str,
+        cfg: PortalConfig,
         autostart: bool = False,
         wait_trigger: bool = False,
     ) -> None:
         super().__init__()
 
-        # ---- 1. Config ------------------------------------------------
-        self.cfg = PortalConfig.from_json(config_path)
+        # ---- 1. Config & clock ----------------------------------------
+        self.cfg = cfg
+        self.clock = SessionClock()
         self._autostart = autostart
         self._wait_trigger = wait_trigger
         self._key_watcher: GlobalKeyWatcher | None = None
@@ -56,15 +66,29 @@ class MousePortal(ShowBase):
         # ---- 2. Window ------------------------------------------------
         wp = WindowProperties()
         wp.setSize(self.cfg.window.width, self.cfg.window.height)
-        wp.setOrigin(self.cfg.window.origin_x, self.cfg.window.origin_y)
+        # (-1, -1) is Panda's "let the OS place it", which is what an unset
+        # origin means.
+        wp.setOrigin(
+            self.cfg.window.origin_x if self.cfg.window.origin_x is not None else -1,
+            self.cfg.window.origin_y if self.cfg.window.origin_y is not None else -1,
+        )
         self.win.requestProperties(wp)
         self.setFrameRateMeter(True)
         self.disableMouse()
+
+        # MousePortal owns the buffer swap so it can be timed; state it rather
+        # than inherit it from the config default.
+        self.graphicsEngine.setAutoFlip(not self.cfg.timing.explicit_flip)
+
+        self.sync_patch = (
+            SyncPatch(self, self.cfg.sync_patch) if self.cfg.sync_patch.enabled else None
+        )
 
         # ---- 3. Input -------------------------------------------------
         self.input = InputManager(
             self, self.cfg.input,
             speed_scaling=self.cfg.camera.speed_scaling,
+            clock=self.clock,
             keyboard_speed=self.cfg.camera.keyboard_speed,
         )
 
@@ -83,14 +107,21 @@ class MousePortal(ShowBase):
         # ---- 7. Triggers ----------------------------------------------
         self.triggers = TriggerManager(self.cfg.triggers)
 
-        # ---- 8. Data logger -------------------------------------------
-        log_path = self.cfg.logging.bids_path()
-        self.data_logger = DataLogger(log_path)
-        print(f"[MousePortal] Logging to: {log_path}")
+        # ---- 8. Session logger ----------------------------------------
+        stem = self.cfg.logging.stem()
+        self.data_logger = SessionLogger(
+            stem,
+            header=self._timing_header(),
+            dropped_frame_threshold=self.cfg.timing.dropped_frame_threshold,
+        )
+        print(f"[MousePortal] Logging to: {stem}-{{samples,events,trials}}.csv")
 
-        # ---- 9. Camera & update task ----------------------------------
+        # ---- 9. Camera & tasks ----------------------------------------
         self._camera_position: float = 0.0
         self._distance_since_recycle: float = 0.0
+        self._pending: dict = {}
+        self._pending_events: list = []
+        self._trial_start_ts: float = 0.0
         self.camera.setPos(0, 0, self.cfg.camera.height)
         self.camera.setHpr(0, 0, 0)
 
@@ -141,7 +172,8 @@ class MousePortal(ShowBase):
             "[Space] start / end trial    [F1] toggle HUD    [Esc] quit"
         )
 
-        self.taskMgr.add(self._update, "updateTask")
+        self.taskMgr.add(self._update, "updateTask", sort=UPDATE_SORT)
+        self.taskMgr.add(self._flip, "flipTask", sort=FLIP_SORT)
 
         # ---- 10. Start mode + readiness handshake ---------------------
         # Driven by an external orchestrator (e.g. mesofield), MousePortal
@@ -170,8 +202,13 @@ class MousePortal(ShowBase):
     # ─── Core loop ──────────────────────────────────────────────────────────
 
     def _update(self, task: Task) -> int:
-        """Per-frame update: input → experiment → move → recycle → log."""
-        dt: float = globalClock.getDt()  # type: ignore[name-defined]
+        """Per-frame update: input → experiment → move → recycle → stage the row.
+
+        Runs before ``igLoop`` draws, so it stages the sample rather than
+        writing it; :meth:`_flip` completes it with the measured presentation
+        time once the swap has happened.
+        """
+        dt: float = self.clock.dt()
 
         # 0. Global spacebar trigger (only while armed and waiting).
         if self._key_watcher is not None and self._key_watcher.pressed():
@@ -204,17 +241,28 @@ class MousePortal(ShowBase):
             self.corridor.recycle_backward()
             self._distance_since_recycle += seg_len
 
-        # 5. Log.
-        self.data_logger.log_frame(
-            position=self._camera_position,
-            velocity=velocity,
-            effective_velocity=effective_velocity,
-            condition=self.experiment.condition.label,
-            state=state.name,
-            block=self.experiment.block,
-            trial=self.experiment.trial,
-            treadmill_device_us=self.input.last_device_us,
-        )
+        # 5. Stage the sample row and drive the photodiode patch.
+        frame_time = self.clock.frame_time()
+        sample = self.input.last_sample
+        self._pending = {
+            "frame": self.clock.frame(),
+            "timestamp": self.clock.unix(frame_time),
+            "frame_dt": dt,
+            "sync_level": self.sync_patch.advance() if self.sync_patch else NA,
+            "state": state.name,
+            "block": self.experiment.block,
+            "trial": self.experiment.trial,
+            "condition": self.experiment.condition.label,
+            "position": self._camera_position,
+            "velocity": velocity,
+            "effective_velocity": effective_velocity,
+            "treadmill_device_us": sample.timestamp if sample else NA,
+            "treadmill_age": (
+                frame_time - sample.received
+                if sample is not None and sample.received is not None
+                else NA
+            ),
+        }
 
         # 6. Debug HUD.
         if self._debug_hud_on:
@@ -267,11 +315,72 @@ class MousePortal(ShowBase):
 
         return Task.cont
 
+    def _flip(self, task: Task) -> int:
+        """Swap the buffers and write the frame's rows with the measured time.
+
+        ``readyFlip`` blocks until the GPU has finished drawing, so the
+        ``flipFrame`` that follows is the buffer swap itself; with vsync on it
+        returns at the vertical blank.  ``flip_wait`` near zero means the frame
+        missed its vblank and the swap did not have to wait.
+        """
+        if self.cfg.timing.explicit_flip:
+            self.graphicsEngine.readyFlip()
+            before = self.clock.now()
+            self.graphicsEngine.flipFrame()
+            after = self.clock.now()
+        else:
+            before = after = self.clock.now()
+
+        flip_timestamp = self.clock.unix(after)
+        self._pending["flip_timestamp"] = flip_timestamp
+        self._pending["flip_wait"] = after - before
+        self._pending["dropped"] = self.data_logger.classify_flip(after)
+        self.data_logger.write_sample(self._pending)
+
+        for event in self._pending_events:
+            event["flip_timestamp"] = flip_timestamp if event["visual"] else NA
+            del event["visual"]
+            self.data_logger.write_event(event)
+        self._pending_events.clear()
+        return Task.cont
+
     # ─── Event handlers ─────────────────────────────────────────────────────
 
-    def _on_experiment_event(self, event_name: str, details: dict) -> None:
-        """Relay experiment state-transition events to the data log."""
-        self.data_logger.log_event(event_name, details)
+    def _record_event(self, event: str, fields: dict, visual: bool = True) -> None:
+        """Queue an event for this frame.
+
+        Held until :meth:`_flip` so it carries the same frame index and
+        presentation time as the sample row it belongs to.  ``visual`` marks
+        whether the event had a consequence on screen; when it did not,
+        ``flip_timestamp`` is written as ``n/a`` rather than implying a
+        presentation time that means nothing.
+        """
+        self._pending_events.append({
+            "timestamp": self.clock.unix(self.clock.frame_time()),
+            "frame": self.clock.frame(),
+            "block": fields["block"],
+            "trial": fields["trial"],
+            "event": event,
+            "condition": fields["condition"] if fields["condition"] is not None else NA,
+            "value": fields["value"] if fields["value"] is not None else NA,
+            "visual": visual,
+        })
+
+    def _on_experiment_event(self, event: str, fields: dict) -> None:
+        """Relay state machine events, and close out the trials table."""
+        self._record_event(event, fields)
+        if event == "TRIAL_START":
+            self._trial_start_ts = self.clock.unix(self.clock.frame_time())
+        elif event == "TRIAL_END":
+            end_ts = self.clock.unix(self.clock.frame_time())
+            row = self.experiment.trial_summary()
+            row["start_timestamp"] = self._trial_start_ts
+            row["end_timestamp"] = end_ts
+            row["n_frames"] = self.data_logger.trial.n_frames
+            row["n_dropped"] = self.data_logger.trial.n_dropped
+            row["mean_velocity"] = self.data_logger.trial.mean_velocity
+            row["mean_effective_velocity"] = self.data_logger.trial.mean_effective_velocity
+            self.data_logger.write_trial(row)
 
     def _on_space(self) -> None:
         """Space bar: fire the trigger, start, or end the current trial."""
@@ -285,24 +394,21 @@ class MousePortal(ShowBase):
     def _on_trigger(self, source: str) -> None:
         """Record the trigger keypress and release the armed experiment.
 
-        The press is logged as a *frame* row rather than an event row: a frame
-        row carries ``treadmill_device_us``, so the press lands on the same
-        clock as the corridor samples and the mesofield cameras, and offline
-        alignment resolves it like any other frame.  An event row would only
-        carry wall-clock time, which is not on that clock.  The press time also
-        goes to stdout, where the parent process's log picks it up.
+        The press has no visual consequence of its own, so the event row gets
+        no ``flip_timestamp``; its ``frame`` locates it in the sample stream,
+        where the device clock and position for that frame live.  The same
+        timestamp goes to stdout for the parent process's log.
 
         Ignored unless the experiment is armed and waiting.
         """
         if self.experiment.state != ExperimentState.WAITING_FOR_TRIGGER:
             return
-        pressed_at = time.time()
-        self.data_logger.log_frame(
-            position=self._camera_position,
-            velocity=self.input.velocity,
-            state=self.experiment.state.name,
-            treadmill_device_us=self.input.last_device_us,
-            event=f"trigger.spacebar|{source}",
+        pressed_at = self.clock.unix(self.clock.frame_time())
+        self._record_event(
+            "SESSION_TRIGGER",
+            {"block": self.experiment.block, "trial": self.experiment.trial,
+             "condition": None, "value": source},
+            visual=False,
         )
         print(f"MOUSEPORTAL_TRIGGER {pressed_at:.6f} {source}", flush=True)
         # Stop watching globally: from here a spacebar means "end trial", and
@@ -317,6 +423,40 @@ class MousePortal(ShowBase):
             self._debug_root.show()
         else:
             self._debug_root.hide()
+
+    # ─── Timing metadata ────────────────────────────────────────────────────
+
+    def _timing_header(self) -> dict:
+        """Fixed half of the timing sidecar; the logger fills in the measured half."""
+        from panda3d.core import PandaSystem
+
+        info = self.pipe.getDisplayInformation()
+        mode = info.getCurrentDisplayModeIndex()
+        return {
+            "clock": self.clock.describe(),
+            "display": {
+                "sync_video": self.cfg.timing.sync_video,
+                "explicit_flip": self.cfg.timing.explicit_flip,
+                "dropped_frame_threshold": self.cfg.timing.dropped_frame_threshold,
+                "reported_refresh_hz": (
+                    info.getDisplayModeRefreshRate(mode)
+                    if 0 <= mode < info.getTotalDisplayModes() else None
+                ),
+                "window_size": [self.cfg.window.width, self.cfg.window.height],
+            },
+            "sync_patch": {
+                "enabled": self.cfg.sync_patch.enabled,
+                "corner": self.cfg.sync_patch.corner,
+                "size": self.cfg.sync_patch.size,
+                "high": self.cfg.sync_patch.high,
+                "low": self.cfg.sync_patch.low,
+                "policy": "toggle-per-frame",
+            },
+            "software": {
+                "panda3d": PandaSystem.getVersionString(),
+                "mouseportal": self._get_version(),
+            },
+        }
 
     # ─── Debug HUD helpers ──────────────────────────────────────────────────
 
@@ -384,6 +524,8 @@ class MousePortal(ShowBase):
         self.data_logger.close()
         self.input.close()
         self.triggers.close()
+        if self.sync_patch is not None:
+            self.sync_patch.close()
         self.userExit()
 
 
@@ -433,12 +575,16 @@ def main() -> None:
         return
 
     try:
+        cfg = PortalConfig.from_json(args.config)
+        # sync-video is read when the window opens, so it has to be in place
+        # before ShowBase is constructed.
+        loadPrcFileData("mouseportal", f"sync-video {int(cfg.timing.sync_video)}")
         app = MousePortal(
-            args.config,
+            cfg,
             autostart=args.autostart,
             wait_trigger=args.wait_trigger,
         )
-    except (RuntimeError, ValueError) as exc:
+    except (RuntimeError, ValueError, FileExistsError) as exc:
         print(f"[MousePortal] startup error: {exc}", file=sys.stderr)
         sys.exit(1)
 
@@ -498,5 +644,17 @@ _DEFAULT_CONFIG: dict = {
         "session": "01",
         "task": "corridor",
         "output_dir": "data",
+    },
+    "timing": {
+        "explicit_flip": True,
+        "sync_video": True,
+        "dropped_frame_threshold": 1.5,
+    },
+    "sync_patch": {
+        "enabled": False,
+        "corner": "bottom-right",
+        "size": 0.08,
+        "high": 1.0,
+        "low": 0.0,
     },
 }
