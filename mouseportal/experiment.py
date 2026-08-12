@@ -269,10 +269,17 @@ class ExperimentStateMachine:
             self._begin_next_trial()
 
     def _draw_iti(self) -> float:
-        """Length of the next ITI: a seeded uniform draw, or the fixed value."""
-        if self.cfg.iti_range is None:
+        """Length of the next ITI: a seeded uniform draw, or the fixed value.
+
+        The just-ended condition owns the interval that follows it, so its
+        ``iti_after`` / ``iti_range`` take precedence over the global values.
+        """
+        if not self._condition.iti_after:
+            return 0.0
+        iti_range = self._condition.iti_range or self.cfg.iti_range
+        if iti_range is None:
             return self.cfg.iti_duration
-        lo, hi = self.cfg.iti_range
+        lo, hi = iti_range
         return self._rng.uniform(lo, hi)
 
     # ─── External triggers ──────────────────────────────────────────────────

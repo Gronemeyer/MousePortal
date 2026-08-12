@@ -131,6 +131,14 @@ class TrialCondition:
     global ``ExperimentConfig.trial_end_condition`` for this condition.
     ``trial_distance`` and ``trial_duration`` work the same way.  When
     left as ``None`` the global value is used.
+
+    Per-condition ITI overrides
+    ---------------------------
+    ``iti_after=False`` suppresses the interval after this condition, so
+    the next condition in the sequence starts on the same frame — that is
+    how several conditions are chained into one perceived trial.
+    ``iti_range`` overrides the global draw for the interval this
+    condition ends with.
     """
     label: str = "normal"
     transform_type: str = "identity"
@@ -138,6 +146,8 @@ class TrialCondition:
     trial_end_condition: Optional[str] = None   # "distance", "duration", "manual"
     trial_distance: Optional[float] = None
     trial_duration: Optional[float] = None
+    iti_after: bool = True
+    iti_range: Optional[Tuple[float, float]] = None
     # Future go/no-go fields (uncomment when needed):
     # wall_texture_override: Optional[str] = None
     # trigger_on_enter: Optional[str] = None
@@ -412,7 +422,15 @@ def _parse_experiment(d: Dict[str, Any]) -> Dict[str, Any]:
     # Parse conditions list → TrialCondition instances
     if "conditions" in out and isinstance(out["conditions"], list):
         out["conditions"] = [
-            TrialCondition(**c) if isinstance(c, dict) else c
+            TrialCondition(**_parse_condition(c)) if isinstance(c, dict) else c
             for c in out["conditions"]
         ]
+    return out
+
+
+def _parse_condition(d: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert condition JSON to TrialCondition kwargs."""
+    out = dict(d)
+    if isinstance(out.get("iti_range"), list):
+        out["iti_range"] = tuple(out["iti_range"])
     return out
