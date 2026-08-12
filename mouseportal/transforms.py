@@ -95,6 +95,22 @@ class InvertTransform(VelocityTransform):
         return -velocity
 
 
+class ReverseTransform(VelocityTransform):
+    """Open-loop reversal — the corridor runs backward at a fixed speed.
+
+    Unlike ``invert``, the input is ignored entirely: the camera moves
+    backward whether or not the subject is running.
+    """
+
+    def __init__(self, speed: float = 20.0) -> None:
+        if speed < 0:
+            raise ValueError(f"speed must be non-negative: {speed}")
+        self.speed = speed
+
+    def __call__(self, velocity: float, dt: float, position: float) -> float:
+        return -self.speed
+
+
 class ClampTransform(VelocityTransform):
     """Clamp velocity to a [lo, hi] range."""
 
@@ -167,6 +183,7 @@ _REGISTRY: Dict[str, type] = {
     "freeze": FreezeTransform,
     "offset": OffsetTransform,
     "invert": InvertTransform,
+    "reverse": ReverseTransform,
     "clamp": ClampTransform,
     "noisy": NoisyTransform,
     "delay": DelayTransform,

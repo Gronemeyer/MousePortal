@@ -23,6 +23,7 @@ which state follows.  The set is open: ``STIMULUS_ONSET``, ``RESPONSE`` and
 from __future__ import annotations
 
 import json
+import random
 from enum import Enum, auto
 from typing import Any, Callable, Dict, Optional
 
@@ -65,6 +66,14 @@ class ExperimentStateMachine:
         self._trial_distance_start: Optional[float] = None
         self._trial_distance_traveled: float = 0.0
         self._iti_elapsed: float = 0.0
+
+        # One RNG for the whole session. An unset seed is drawn here and exposed
+        # so the caller can record it; passing it back reproduces the session.
+        self.seed: int = (
+            cfg.random_seed if cfg.random_seed is not None else random.randrange(2 ** 31)
+        )
+        self._rng = random.Random(self.seed)
+        self._iti_target: float = cfg.iti_duration
 
         # Active trial condition & velocity transform
         self._condition: TrialCondition = TrialCondition()
@@ -143,6 +152,11 @@ class ExperimentStateMachine:
     def iti_elapsed(self) -> float:
         """Seconds elapsed in the current ITI."""
         return self._iti_elapsed
+
+    @property
+    def iti_target(self) -> float:
+        """Length drawn for the current ITI."""
+        return self._iti_target
 
     @property
     def trial_distance(self) -> float:
@@ -251,8 +265,15 @@ class ExperimentStateMachine:
 
     def _tick_iti(self, dt: float) -> None:
         self._iti_elapsed += dt
-        if self._iti_elapsed >= self.cfg.iti_duration:
+        if self._iti_elapsed >= self._iti_target:
             self._begin_next_trial()
+
+    def _draw_iti(self) -> float:
+        """Length of the next ITI: a seeded uniform draw, or the fixed value."""
+        if self.cfg.iti_range is None:
+            return self.cfg.iti_duration
+        lo, hi = self.cfg.iti_range
+        return self._rng.uniform(lo, hi)
 
     # ─── External triggers ──────────────────────────────────────────────────
 
@@ -265,10 +286,16 @@ class ExperimentStateMachine:
             value=self._active_end_condition.value,
             condition=self._condition.label,
         )
-        if self.cfg.iti_duration > 0:
+        self._iti_target = self._draw_iti()
+        if self._iti_target > 0:
             self._iti_elapsed = 0.0
             self.state = ExperimentState.INTER_TRIAL_INTERVAL
-            self._emit("ITI_START", condition=self._condition.label)
+            # The corridor still tracks the treadmill during the ITI, but the
+            # trial's transform ended with the trial — the ITI is closed-loop.
+            self._transform = IdentityTransform()
+            self._emit(
+                "ITI_START", value=self._iti_target, condition=self._condition.label,
+            )
         else:
             self._begin_next_trial()
 

@@ -78,9 +78,28 @@ overridden per-condition (see below).
 | `num_blocks` | int | `1` | Total number of blocks in the session |
 | `trials_per_block` | int | `1` | Trials per block |
 | `iti_duration` | float | `2.0` | Inter-trial interval in seconds |
+| `iti_range` | [float, float] | `null` | When set, each ITI is drawn uniformly from `[min, max]` instead of using `iti_duration` |
+| `random_seed` | int | `null` | Seed for every random draw in the session; unset means one is drawn at startup |
 | `trial_end_condition` | string | `"manual"` | Default end rule: `"distance"`, `"duration"`, or `"manual"` |
 | `trial_distance` | float | `100.0` | Target distance for `"distance"` end rule (corridor units) |
 | `trial_duration` | float | `60.0` | Target time for `"duration"` end rule (seconds) |
+
+The transform belongs to the trial, not to the ITI: during the inter-trial
+interval the corridor is always closed-loop (identity), whatever the trial's
+transform was.
+
+### Randomised timing and the seed
+
+```json
+"iti_duration": 30.0,
+"iti_range": [15.0, 45.0],
+"random_seed": 20260811
+```
+
+The seed actually used is written to `timing.json` under `experiment.random_seed`
+and printed at startup, so a session started with `random_seed` unset can still
+be repeated — put the recorded seed back in the config. Each drawn interval is
+also logged as the `value` of that ITI's `ITI_START` event.
 
 ### `conditions` — the palette of trial types
 
@@ -125,6 +144,7 @@ If `block_conditions` or `conditions` is empty/absent, every trial defaults to
 | `freeze` | Force velocity to 0 | — | `{"label": "freeze", "transform_type": "freeze"}` |
 | `offset` | Add constant drift | `offset` (float) | `{"label": "drift", "transform_type": "offset", "transform_params": {"offset": 5.0}}` |
 | `invert` | Reverse direction | — | `{"label": "invert", "transform_type": "invert"}` |
+| `reverse` | Move backward at a fixed speed, ignoring input | `speed` (float) | `{"label": "reverse", "transform_type": "reverse", "transform_params": {"speed": 20.0}}` |
 | `clamp` | Limit to range | `lo`, `hi` (floats) | `{"label": "limited", "transform_type": "clamp", "transform_params": {"lo": 0, "hi": 10}}` |
 | `noisy` | Add Gaussian noise | `sigma` (float) | `{"label": "jitter", "transform_type": "noisy", "transform_params": {"sigma": 3.0}}` |
 | `delay` | Temporal lag | `delay_sec` (float) | `{"label": "lag200ms", "transform_type": "delay", "transform_params": {"delay_sec": 0.2}}` |
@@ -144,6 +164,11 @@ If `block_conditions` or `conditions` is empty/absent, every trial defaults to
   the corridor will jitter even when the subject is stationary.
 - **`offset`** — the corridor drifts even when the subject is stationary
   (`velocity = 0 + offset`). Useful for simulating involuntary motion.
+- **`reverse`** — open-loop backward motion: the input is discarded and the
+  camera moves backward at `speed` for the whole trial. Unlike `invert`, a
+  stationary subject still sees the corridor reverse. Pair it with
+  `"trial_end_condition": "duration"`; a distance rule would end the trial on
+  the backward travel.
 
 ---
 

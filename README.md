@@ -28,7 +28,7 @@ A subject runs on a treadmill; encoder velocity drives a first-person camera dow
   callable for testabilty.
 
 - **Velocity transforms**: `raw → transform(velocity, dt, position) → camera`.
-  Stateless kernels (`identity`, `gain`, `offset`, `invert`, `clamp`, `freeze`)
+  Stateless kernels (`identity`, `gain`, `offset`, `invert`, `reverse`, `clamp`, `freeze`)
   and stateful ones (`noisy`, and `delay`) share call signature and a `reset()`
   at trial onset, A string-keyed registry (`build_transform`) constructs them from JSON.
 

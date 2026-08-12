@@ -115,6 +115,7 @@ class MousePortal(ShowBase):
             dropped_frame_threshold=self.cfg.timing.dropped_frame_threshold,
         )
         print(f"[MousePortal] Logging to: {stem}-{{samples,events,trials}}.csv")
+        print(f"[MousePortal] Random seed: {self.experiment.seed}", flush=True)
 
         # ---- 9. Camera & tasks ----------------------------------------
         self._camera_position: float = 0.0
@@ -275,9 +276,7 @@ class MousePortal(ShowBase):
             self._title_tn.setText(f"MousePortal  v{self._get_version()}")
 
             # Trial progress line
-            progress = self._format_trial_progress(
-                state, exp, ecfg, effective_velocity,
-            )
+            progress = self._format_trial_progress(state, exp, effective_velocity)
 
             # Condition detail
             transform_info = cond.transform_type
@@ -434,6 +433,12 @@ class MousePortal(ShowBase):
         mode = info.getCurrentDisplayModeIndex()
         return {
             "clock": self.clock.describe(),
+            "experiment": {
+                # The seed actually used, whether configured or drawn at startup.
+                # Put it back in the config to repeat the session's ITI sequence.
+                "random_seed": self.experiment.seed,
+                "iti_range": list(self.cfg.experiment.iti_range or ()),
+            },
             "display": {
                 "sync_video": self.cfg.timing.sync_video,
                 "explicit_flip": self.cfg.timing.explicit_flip,
@@ -472,7 +477,6 @@ class MousePortal(ShowBase):
     def _format_trial_progress(
         state: "ExperimentState",
         exp: "ExperimentStateMachine",
-        ecfg: "object",
         effective_velocity: float,
     ) -> str:
         """Build a progress string with a text bar for the active phase."""
@@ -503,10 +507,11 @@ class MousePortal(ShowBase):
                 return f"TRIAL       elapsed {exp.trial_elapsed:.1f}s   (manual end)"
 
         elif state == ExperimentState.INTER_TRIAL_INTERVAL:
-            frac = min(exp.iti_elapsed / ecfg.iti_duration, 1.0) if ecfg.iti_duration > 0 else 0.0
+            target = exp.iti_target
+            frac = min(exp.iti_elapsed / target, 1.0) if target > 0 else 0.0
             filled = int(frac * bar_width)
             bar = "|" + "." * filled + " " * (bar_width - filled) + "|"
-            return f"ITI         {bar} {exp.iti_elapsed:.1f} / {ecfg.iti_duration:.1f}s"
+            return f"ITI         {bar} {exp.iti_elapsed:.1f} / {target:.1f}s"
 
         elif state == ExperimentState.WAITING_FOR_TRIGGER:
             return "            ARMED — waiting for the [Space] trigger"

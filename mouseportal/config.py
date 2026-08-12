@@ -148,6 +148,12 @@ class ExperimentConfig:
     num_blocks: int = 1
     trials_per_block: int = 1
     iti_duration: float = 2.0
+    # When set to (min, max), each ITI is drawn uniformly from that range with
+    # the seeded RNG instead of using the fixed ``iti_duration``.
+    iti_range: Optional[Tuple[float, float]] = None
+    # Seed for every random draw in the session. Left as None, the state machine
+    # draws one and records it in the timing sidecar so the session can be repeated.
+    random_seed: Optional[int] = None
     trial_end_condition: TrialEndCondition = TrialEndCondition.MANUAL
     trial_distance: float = 100.0       # used when condition == DISTANCE
     trial_duration: float = 60.0        # used when condition == DURATION
@@ -161,6 +167,12 @@ class ExperimentConfig:
             raise ValueError(f"trials_per_block must be >= 1: {self.trials_per_block}")
         if self.iti_duration < 0:
             raise ValueError(f"iti_duration must be non-negative: {self.iti_duration}")
+        if self.iti_range is not None:
+            if len(self.iti_range) != 2:
+                raise ValueError(f"iti_range must be [min, max]: {self.iti_range}")
+            lo, hi = self.iti_range
+            if lo < 0 or hi < lo:
+                raise ValueError(f"iti_range must satisfy 0 <= min <= max: {self.iti_range}")
 
     def condition_for(self, block: int, trial: int) -> TrialCondition:
         """Look up the condition for a given (1-indexed) block and trial.
@@ -395,6 +407,8 @@ def _parse_experiment(d: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(d)
     if "trial_end_condition" in out and isinstance(out["trial_end_condition"], str):
         out["trial_end_condition"] = TrialEndCondition(out["trial_end_condition"])
+    if isinstance(out.get("iti_range"), list):
+        out["iti_range"] = tuple(out["iti_range"])
     # Parse conditions list → TrialCondition instances
     if "conditions" in out and isinstance(out["conditions"], list):
         out["conditions"] = [
