@@ -93,6 +93,11 @@ class MousePortal(ShowBase):
         )
 
         # ---- 4. Corridor geometry -------------------------------------
+        # Extra asset directory first: corridor construction resolves texture
+        # paths, so the search path has to be in place before it runs.
+        if self.cfg.assets.model_path:
+            from panda3d.core import getModelPath
+            getModelPath().appendDirectory(self.cfg.assets.model_path)
         self.corridor = Corridor(self, self.cfg.corridor)
 
         # ---- 5. Fog ---------------------------------------------------
@@ -253,7 +258,11 @@ class MousePortal(ShowBase):
             "state": state.name,
             "block": self.experiment.block,
             "trial": self.experiment.trial,
-            "condition": self.experiment.condition.label,
+            # No trial has run yet, so there is no condition to name. Writing
+            # n/a keeps those frames from reading as a real condition.
+            "condition": (
+                self.experiment.condition.label if self.experiment.block else NA
+            ),
             "position": self._camera_position,
             "velocity": velocity,
             "effective_velocity": effective_velocity,
@@ -270,7 +279,13 @@ class MousePortal(ShowBase):
             fps = globalClock.getAverageFrameRate()  # type: ignore[name-defined]
             cond = self.experiment.condition
             exp = self.experiment
-            ecfg = self.cfg.experiment
+            # Named blocks are what the operator recognises mid-session; the
+            # index alone does not say which of two orders is running.
+            block_name = (
+                f"  {exp.block_config.name}"
+                if 1 <= exp.block <= exp.num_blocks and exp.block_config.name
+                else ""
+            )
 
             # Title
             self._title_tn.setText(f"MousePortal  v{self._get_version()}")
@@ -295,8 +310,8 @@ class MousePortal(ShowBase):
 
             self._info_tn.setText(
                 f"STATE       {state.name}\n"
-                f"BLOCK       {exp.block} / {ecfg.num_blocks}"
-                f"      TRIAL  {exp.trial} / {ecfg.trials_per_block}\n"
+                f"BLOCK       {exp.block} / {exp.num_blocks}{block_name}"
+                f"      TRIAL  {exp.trial} / {exp.trials_in_block}\n"
                 f"CONDITION   {cond.label}"
                 f"    TRANSFORM  {transform_info}\n"
                 f"\n"
@@ -433,10 +448,11 @@ class MousePortal(ShowBase):
         mode = info.getCurrentDisplayModeIndex()
         return {
             "clock": self.clock.describe(),
+            # The seed actually used (whether configured or drawn at startup)
+            # and the realised block order. Put the seed back in the config to
+            # repeat the session's ITI draws and shuffled block orders exactly.
             "experiment": {
-                # The seed actually used, whether configured or drawn at startup.
-                # Put it back in the config to repeat the session's ITI sequence.
-                "random_seed": self.experiment.seed,
+                **self.experiment.describe_plan(),
                 "iti_range": list(self.cfg.experiment.iti_range or ()),
             },
             "display": {
@@ -613,7 +629,7 @@ _DEFAULT_CONFIG: dict = {
     },
     "camera": {
         "height": 2.0,
-        "speed_scaling": 0.05,
+        "speed_scaling": 1.0,
         "keyboard_speed": 20.0,
     },
     "fog": {
@@ -626,17 +642,13 @@ _DEFAULT_CONFIG: dict = {
         "baud_rate": 57600,
     },
     "experiment": {
-        "num_blocks": 2,
-        "trials_per_block": 2,
         "iti_duration": 2.0,
-        "trial_end_condition": "distance",
-        "trial_distance": 50.0,
-        "trial_duration": 60.0,
         "conditions": [
-            {"label": "normal", "transform_type": "identity"},
+            {"label": "normal", "transform_type": "identity",
+             "trial_end_condition": "distance", "trial_distance": 50.0},
         ],
-        "block_conditions": [
-            {"condition_sequence": ["normal", "normal"]},
+        "blocks": [
+            {"name": "baseline", "sequence": ["normal"], "repeat": 4},
         ],
     },
     "triggers": {

@@ -69,6 +69,7 @@ EVENT_FIELDS = [
 
 TRIAL_FIELDS = [
     "block",
+    "block_name",
     "trial",
     "condition",
     "transform",
@@ -117,6 +118,7 @@ COLUMN_DOC = {
     },
     "trials": {
         "block": ["", "Block index, 1-based"],
+        "block_name": ["", "Block name from the config; n/a when the block is unnamed"],
         "trial": ["", "Trial index within the block, 1-based"],
         "condition": ["", "Trial condition label"],
         "transform": ["", "Velocity transform type"],

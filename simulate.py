@@ -157,10 +157,13 @@ def run_simulation(
         log_raw["output_dir"] = output_dir
     log_cfg = LoggingConfig(**log_raw)
 
-    # Parse experiment config via the same helpers the real app uses.
-    from mouseportal.config import _parse_experiment
+    # Parse experiment config via the same helpers the real app uses, so a
+    # config the simulator accepts is one the app will accept too.
+    from mouseportal.config import _build, _parse_experiment
 
-    exp_cfg = ExperimentConfig(**_parse_experiment(raw.get("experiment", {})))
+    if "experiment" not in raw:
+        raise ValueError(f"Config '{config_path}' is missing the 'experiment' section")
+    exp_cfg = _build(ExperimentConfig, _parse_experiment(raw["experiment"]), "experiment")
 
     # ── 2. Instantiate components ───────────────────────────────────────
     events_log: list[tuple[str, dict]] = []
@@ -179,6 +182,7 @@ def run_simulation(
         stem,
         header={
             "clock": clock.describe(),
+            "experiment": esm.describe_plan(),
             "display": {
                 "sync_video": None,
                 "explicit_flip": None,
@@ -200,13 +204,14 @@ def run_simulation(
     trial_start_ts: float = 0.0
 
     if verbose:
-        total_trials = exp_cfg.num_blocks * exp_cfg.trials_per_block
         print(f"[simulate] Config       : {config_path}")
         print(f"[simulate] FPS          : {fps}")
         print(f"[simulate] Seed         : {seed}")
-        print(f"[simulate] Blocks       : {exp_cfg.num_blocks}")
-        print(f"[simulate] Trials/block : {exp_cfg.trials_per_block}")
-        print(f"[simulate] Total trials : {total_trials}")
+        print(f"[simulate] Blocks       : {esm.num_blocks}")
+        for i, (blk, seq) in enumerate(zip(exp_cfg.blocks, esm.plan), start=1):
+            name = blk.name or f"block {i}"
+            print(f"[simulate]   {name:<12}: {len(seq)} trials  [{', '.join(seq)}]")
+        print(f"[simulate] Total trials : {esm.total_trials}")
         print(f"[simulate] Output       : {csv_path}")
         print()
 

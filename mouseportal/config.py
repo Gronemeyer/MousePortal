@@ -9,11 +9,10 @@ any invalid value raises immediately with a clear message.
 from __future__ import annotations
 
 import json
-import sys
-from dataclasses import dataclass, field
+import random
+from dataclasses import dataclass, field, fields
 from enum import Enum
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 class InputMode(str, Enum):
@@ -28,6 +27,55 @@ class TrialEndCondition(str, Enum):
     DISTANCE = "distance"   # Trial ends after a set distance traveled
     DURATION = "duration"   # Trial ends after a set time elapsed
     MANUAL = "manual"       # Trial ends on external trigger / keypress
+
+
+# Transforms that discard the subject's input entirely. A distance-ended trial
+# of one of these cannot be ended by the subject's running, so the combination
+# is rejected at load rather than left to stall the session.
+_OPEN_LOOP_TRANSFORMS = frozenset({"freeze", "reverse"})
+
+
+def default_seed() -> int:
+    """Today's date as ``YYYYMMDD`` — the seed used when none is configured.
+
+    A date reads as what it is in the sidecar and in a lab notebook, which a
+    random 31-bit integer does not.  Note the consequence: every session run on
+    the same day with no explicit seed draws the same ITI lengths and the same
+    shuffled block orders.  Set ``random_seed`` explicitly per subject when
+    that matters.
+    """
+    from datetime import date
+    return int(date.today().strftime("%Y%m%d"))
+
+
+def _check_iti_range(iti_range: Optional[Sequence[float]], where: str) -> None:
+    """Validate an ``[min, max]`` ITI range. ``None`` means "unset", which is fine."""
+    if iti_range is None:
+        return
+    if len(iti_range) != 2:
+        raise ValueError(f"{where} must be [min, max]: {iti_range}")
+    lo, hi = iti_range
+    if lo < 0 or hi < lo:
+        raise ValueError(f"{where} must satisfy 0 <= min <= max: {iti_range}")
+
+
+def _build(cls, data: Any, where: str):
+    """Construct a config dataclass from a JSON mapping, rejecting unknown keys.
+
+    A misspelled key is the quietest kind of config error: the value is simply
+    ignored and the session runs on the default, which is indistinguishable in
+    the data from having meant the default all along.  Naming the offender at
+    load time costs one set difference and removes the whole class of bug.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(f"{where} must be a JSON object, got {type(data).__name__}")
+    known = {f.name for f in fields(cls)}
+    unknown = sorted(set(data) - known)
+    if unknown:
+        raise ValueError(
+            f"{where}: unknown key(s) {unknown}. Valid keys: {sorted(known)}"
+        )
+    return cls(**data)
 
 
 # ─── Sub-configs ────────────────────────────────────────────────────────────
@@ -74,9 +122,22 @@ class CorridorConfig:
 
 @dataclass(frozen=True)
 class CameraConfig:
+    """Camera placement and the input → corridor velocity gain.
+
+    ``speed_scaling`` converts the encoder's units into corridor units per
+    second and applies to both hardware paths — ``serial`` (MousePortal owns
+    the port) and ``network`` (mesofield owns it and forwards samples). It is
+    the knob that sets how far the corridor travels per unit of treadmill
+    motion, so it is what you calibrate against the animal's real running.
+
+    ``keyboard_speed`` is the corridor speed while an arrow key is held. It is
+    already expressed in corridor units per second, so ``speed_scaling`` does
+    not apply to it — keyboard mode is for testing the corridor, not for
+    reproducing a calibrated treadmill gain.
+    """
     height: float = 2.0
-    speed_scaling: float = 0.05    # multiplier for encoder speed (treadmill)
-    keyboard_speed: float = 20.0   # units/sec when using arrow keys
+    speed_scaling: float = 1.0     # encoder units → corridor units/s
+    keyboard_speed: float = 20.0   # corridor units/s while an arrow key is held
 
     def __post_init__(self) -> None:
         if self.height < 0:
@@ -125,85 +186,237 @@ class TrialCondition:
     texture overrides, trigger cues) can be added here for future
     paradigms like go/no-go without changing downstream code.
 
+    ``label`` and ``transform_type`` are required: a condition that does not
+    say what it is has no defensible default, and inventing one is how a
+    mislabelled trial reaches the CSV looking deliberate.
+
     Per-condition trial-end overrides
     ---------------------------------
-    If ``trial_end_condition`` is set it takes precedence over the
-    global ``ExperimentConfig.trial_end_condition`` for this condition.
-    ``trial_distance`` and ``trial_duration`` work the same way.  When
-    left as ``None`` the global value is used.
+    Trial end
+    ---------
+    Each condition states how its own trials end.  There is no session-wide
+    end rule to fall back on: a rule and its limit belong together, and
+    splitting them across two levels meant a condition's real behaviour could
+    only be worked out by reading both.  ``duration`` requires
+    ``trial_duration``; ``distance`` requires ``trial_distance``; ``manual``
+    requires neither and ends on the experimenter's keypress.
 
-    Per-condition ITI overrides
-    ---------------------------
+    Per-condition ITI
+    -----------------
     ``iti_after=False`` suppresses the interval after this condition, so
     the next condition in the sequence starts on the same frame — that is
     how several conditions are chained into one perceived trial.
-    ``iti_range`` overrides the global draw for the interval this
+    ``iti_range`` overrides the session's draw for the interval this
     condition ends with.
     """
-    label: str = "normal"
-    transform_type: str = "identity"
+    label: str
+    transform_type: str
+    trial_end_condition: TrialEndCondition
     transform_params: Dict[str, Any] = field(default_factory=dict)
-    trial_end_condition: Optional[str] = None   # "distance", "duration", "manual"
     trial_distance: Optional[float] = None
     trial_duration: Optional[float] = None
+    # Planning metadata, never read by the state machine: how long a trial of
+    # this condition is expected to take when its end rule is one whose
+    # duration cannot be known in advance (``distance``, ``manual``).  An
+    # orchestrator sizing a recording needs a number for those trials, and an
+    # explicit estimate is honest where a guessed one is not.
+    expected_duration: Optional[float] = None
     iti_after: bool = True
     iti_range: Optional[Tuple[float, float]] = None
     # Future go/no-go fields (uncomment when needed):
     # wall_texture_override: Optional[str] = None
     # trigger_on_enter: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        if not self.label:
+            raise ValueError("condition label must be a non-empty string")
+        where = f"condition '{self.label}'"
+        if not isinstance(self.trial_end_condition, TrialEndCondition):
+            raise ValueError(
+                f"{where}: trial_end_condition must be one of "
+                f"{[e.value for e in TrialEndCondition]}, got "
+                f"{self.trial_end_condition!r}"
+            )
+
+        if self.trial_end_condition is TrialEndCondition.DURATION:
+            if not self.trial_duration or self.trial_duration <= 0:
+                raise ValueError(
+                    f"{where}: trial_end_condition 'duration' needs a positive "
+                    f"trial_duration, got {self.trial_duration!r}"
+                )
+        elif self.trial_end_condition is TrialEndCondition.DISTANCE:
+            if not self.trial_distance or self.trial_distance <= 0:
+                raise ValueError(
+                    f"{where}: trial_end_condition 'distance' needs a positive "
+                    f"trial_distance, got {self.trial_distance!r}"
+                )
+            # An open-loop transform discards the subject's input, so a
+            # distance rule either can never be satisfied (freeze) or is
+            # satisfied by motion the subject did not produce (reverse). Both
+            # read as an animal that will not run, hours into a session.
+            if self.transform_type in _OPEN_LOOP_TRANSFORMS:
+                raise ValueError(
+                    f"{where}: transform '{self.transform_type}' ignores the "
+                    f"subject's input, so a 'distance' end rule cannot be reached "
+                    f"by the subject's running. Use 'duration' or 'manual'."
+                )
+        if self.expected_duration is not None and self.expected_duration <= 0:
+            raise ValueError(
+                f"{where}: expected_duration must be positive, got "
+                f"{self.expected_duration!r}"
+            )
+        _check_iti_range(self.iti_range, f"{where}: iti_range")
+
+    @property
+    def planning_duration(self) -> Optional[float]:
+        """Seconds a trial of this condition is expected to take, if knowable.
+
+        A ``duration`` trial is its own estimate.  Otherwise this is whatever
+        ``expected_duration`` says, and ``None`` when nothing says — a caller
+        sizing a recording must decide what to do about that rather than be
+        handed a number nobody stated.
+        """
+        if self.trial_end_condition is TrialEndCondition.DURATION:
+            return self.trial_duration
+        return self.expected_duration
+
+
+class BlockOrder(str, Enum):
+    """How a block's expanded trial sequence is ordered."""
+    FIXED = "fixed"       # run the sequence exactly as written
+    SHUFFLE = "shuffle"   # permute it with the session seed
+
+
+@dataclass(frozen=True)
+class BlockConfig:
+    """One block: a trial sequence, optionally repeated and/or shuffled.
+
+    ``sequence`` is the ordered list of condition labels making up one pass of
+    the block.  ``repeat`` concatenates that many passes, so ``repeat`` never
+    changes the *balance* of the block — three repeats of four conditions is
+    always twelve trials, three of each.  ``order="shuffle"`` then permutes
+    the expanded list with the session's seed, which keeps the counts exact
+    while randomising presentation order.
+
+    The block's trial count is therefore ``len(sequence) * repeat``.  There is
+    no global trials-per-block: blocks are independent and may differ in
+    length, which is what makes "one long training block, then two
+    counterbalanced test blocks" expressible.
+
+    ``name`` is optional and is carried into the events and trials tables, so
+    analysis can group by a meaningful label rather than a block index.
+    """
+    sequence: Tuple[str, ...]
+    name: str = ""
+    repeat: int = 1
+    order: BlockOrder = BlockOrder.FIXED
+
+    def __post_init__(self) -> None:
+        if not self.sequence:
+            raise ValueError(f"block {self.describe()}: sequence must not be empty")
+        if self.repeat < 1:
+            raise ValueError(f"block {self.describe()}: repeat must be >= 1, got {self.repeat}")
+
+    def describe(self) -> str:
+        """Human handle for error messages: the name if it has one."""
+        return f"'{self.name}'" if self.name else "(unnamed)"
+
+    @property
+    def num_trials(self) -> int:
+        """Trials this block runs once expanded."""
+        return len(self.sequence) * self.repeat
+
+    def expand(self, rng: random.Random) -> List[str]:
+        """The realised trial order for this block.
+
+        ``rng`` is consumed only when ``order`` is ``shuffle``, so a fixed
+        block's expansion is independent of the seed.
+        """
+        trials = list(self.sequence) * self.repeat
+        if self.order is BlockOrder.SHUFFLE:
+            rng.shuffle(trials)
+        return trials
+
 
 @dataclass(frozen=True)
 class ExperimentConfig:
-    num_blocks: int = 1
-    trials_per_block: int = 1
+    """The session design: a palette of conditions and a list of blocks.
+
+    ``blocks`` is the single source of truth for session structure — the
+    number of blocks is ``len(blocks)`` and each block's trial count comes
+    from its own sequence.  Nothing else declares those counts, so nothing
+    else can disagree with them.
+
+    Trial-end rules live on the conditions, not here.  A rule and its limit
+    belong together, and a session-wide default that each condition may or may
+    not override means the behaviour of a trial can only be read by consulting
+    two places at once.
+
+    Every condition label referenced by a block must exist in ``conditions``,
+    and every condition's transform must build with its parameters.  Both are
+    checked here, at load, rather than at the trial that first needs them.
+    """
+    conditions: Tuple[TrialCondition, ...] = ()
+    blocks: Tuple[BlockConfig, ...] = ()
     iti_duration: float = 2.0
     # When set to (min, max), each ITI is drawn uniformly from that range with
     # the seeded RNG instead of using the fixed ``iti_duration``.
     iti_range: Optional[Tuple[float, float]] = None
     # Seed for every random draw in the session. Left as None, the state machine
-    # draws one and records it in the timing sidecar so the session can be repeated.
+    # falls back to today's date and records it in the timing sidecar.
     random_seed: Optional[int] = None
-    trial_end_condition: TrialEndCondition = TrialEndCondition.MANUAL
-    trial_distance: float = 100.0       # used when condition == DISTANCE
-    trial_duration: float = 60.0        # used when condition == DURATION
-    conditions: List[TrialCondition] = field(default_factory=list)
-    block_conditions: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if self.num_blocks < 1:
-            raise ValueError(f"num_blocks must be >= 1: {self.num_blocks}")
-        if self.trials_per_block < 1:
-            raise ValueError(f"trials_per_block must be >= 1: {self.trials_per_block}")
         if self.iti_duration < 0:
             raise ValueError(f"iti_duration must be non-negative: {self.iti_duration}")
-        if self.iti_range is not None:
-            if len(self.iti_range) != 2:
-                raise ValueError(f"iti_range must be [min, max]: {self.iti_range}")
-            lo, hi = self.iti_range
-            if lo < 0 or hi < lo:
-                raise ValueError(f"iti_range must satisfy 0 <= min <= max: {self.iti_range}")
+        _check_iti_range(self.iti_range, "iti_range")
 
-    def condition_for(self, block: int, trial: int) -> TrialCondition:
-        """Look up the condition for a given (1-indexed) block and trial.
+        if not self.conditions:
+            raise ValueError(
+                "experiment.conditions must define at least one condition"
+            )
+        labels = [c.label for c in self.conditions]
+        duplicates = sorted({lbl for lbl in labels if labels.count(lbl) > 1})
+        if duplicates:
+            raise ValueError(f"duplicate condition labels: {duplicates}")
 
-        Falls back to ``TrialCondition()`` (identity / normal) when the
-        config does not specify conditions.
-        """
-        if not self.block_conditions or not self.conditions:
-            return TrialCondition()
-        block_idx = block - 1
-        trial_idx = trial - 1
-        if block_idx < 0 or block_idx >= len(self.block_conditions):
-            return TrialCondition()
-        seq = self.block_conditions[block_idx].get("condition_sequence", [])
-        if trial_idx < 0 or trial_idx >= len(seq):
-            return TrialCondition()
-        label = seq[trial_idx]
+        # Build every transform now so a bad parameter fails at startup rather
+        # than mid-session, when the trial that needs it finally comes round.
+        from mouseportal.transforms import build_transform
         for cond in self.conditions:
-            if cond.label == label:
-                return cond
-        return TrialCondition()
+            try:
+                build_transform(cond.transform_type, cond.transform_params or None)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"condition '{cond.label}': {exc}") from None
+
+        if not self.blocks:
+            raise ValueError("experiment.blocks must define at least one block")
+        known = set(labels)
+        for i, blk in enumerate(self.blocks, start=1):
+            unknown = [lbl for lbl in blk.sequence if lbl not in known]
+            if unknown:
+                raise ValueError(
+                    f"block {i} {blk.describe()} references undefined condition(s) "
+                    f"{sorted(set(unknown))}. Defined conditions: {sorted(known)}"
+                )
+
+    @property
+    def num_blocks(self) -> int:
+        """Number of blocks in the session."""
+        return len(self.blocks)
+
+    @property
+    def total_trials(self) -> int:
+        """Trials across the whole session, once every block is expanded."""
+        return sum(blk.num_trials for blk in self.blocks)
+
+    def condition_map(self) -> Dict[str, TrialCondition]:
+        """Label → condition. Every block label is guaranteed to be a key."""
+        return {c.label: c for c in self.conditions}
+
+    def expand(self, rng: random.Random) -> List[List[str]]:
+        """Realise every block's trial order, in session order."""
+        return [blk.expand(rng) for blk in self.blocks]
 
 
 @dataclass(frozen=True)
@@ -257,6 +470,29 @@ class SyncPatchConfig:
             raise ValueError(f"sync_patch.size must be in (0, 0.5]: {self.size}")
         if not (0.0 <= self.low <= 1.0 and 0.0 <= self.high <= 1.0):
             raise ValueError(f"sync_patch levels must be in [0,1]: {self.low}, {self.high}")
+
+
+@dataclass(frozen=True)
+class AssetsConfig:
+    """Where to look for corridor textures and models beyond the app install.
+
+    ``model_path`` is appended to Panda3D's model search path, so texture and
+    model references in :class:`CorridorConfig` resolve against it as well as
+    against the working directory.  That lets a rig keep its stimulus assets
+    outside the MousePortal checkout.
+    """
+    model_path: str = ""
+
+    def __post_init__(self) -> None:
+        # An asset directory that is not there resolves to silently missing
+        # textures at render time, which reads as a corridor styling mistake
+        # rather than a path one.
+        if self.model_path:
+            import os
+            if not os.path.isdir(self.model_path):
+                raise ValueError(
+                    f"assets.model_path is not a directory: {self.model_path!r}"
+                )
 
 
 @dataclass(frozen=True)
@@ -315,6 +551,11 @@ class PortalConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     timing: TimingConfig = field(default_factory=TimingConfig)
     sync_patch: SyncPatchConfig = field(default_factory=SyncPatchConfig)
+    assets: AssetsConfig = field(default_factory=AssetsConfig)
+
+    # Sections that must be present: without them there is no experiment and
+    # no place to write it, and a default for either would be a guess.
+    _REQUIRED_SECTIONS = ("experiment", "logging")
 
     # ─── Loaders ────────────────────────────────────────────────────────
     @classmethod
@@ -322,9 +563,8 @@ class PortalConfig:
         """
         Load and validate configuration from a JSON file.
 
-        Raises on any I/O or validation error (fail-fast).
-        Accepts both the new nested schema and the legacy flat schema
-        produced by prior versions (``cfg.json`` v0.2).
+        Raises on any I/O or validation error, naming the offending section —
+        nothing is defaulted silently and no key is ignored.
         """
         try:
             with open(path, "r") as fh:
@@ -332,65 +572,34 @@ class PortalConfig:
         except (OSError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Failed to load config '{path}': {exc}") from exc
 
-        # Detect legacy flat config (has top-level "segment_length" key)
-        if "segment_length" in raw:
-            return cls._from_legacy(raw)
+        if not isinstance(raw, dict):
+            raise ValueError(f"Config '{path}' must be a JSON object at the top level")
+
+        known_sections = {f.name for f in fields(cls)}
+        unknown = sorted(set(raw) - known_sections)
+        if unknown:
+            raise ValueError(
+                f"Config '{path}': unknown section(s) {unknown}. "
+                f"Valid sections: {sorted(known_sections)}"
+            )
+        missing = [s for s in cls._REQUIRED_SECTIONS if s not in raw]
+        if missing:
+            raise ValueError(f"Config '{path}' is missing required section(s): {missing}")
 
         return cls(
-            window=WindowConfig(**raw.get("window", {})),
-            corridor=CorridorConfig(**raw.get("corridor", {})),
-            camera=CameraConfig(**raw.get("camera", {})),
-            fog=FogConfig(**_parse_fog(raw.get("fog", {}))),
-            input=InputConfig(**_parse_input(raw.get("input", {}))),
-            experiment=ExperimentConfig(**_parse_experiment(raw.get("experiment", {}))),
-            triggers=TriggerConfig(**raw.get("triggers", {})),
-            logging=LoggingConfig(**raw.get("logging", {"subject": "000", "session": "00", "task": "portal"})),
-            timing=TimingConfig(**raw.get("timing", {})),
-            sync_patch=SyncPatchConfig(**raw.get("sync_patch", {})),
-        )
-
-    @classmethod
-    def _from_legacy(cls, raw: Dict[str, Any]) -> "PortalConfig":
-        """Map the flat v0.2 cfg.json keys to the nested structure."""
-        return cls(
-            window=WindowConfig(
-                width=raw.get("window_width", 1920),
-                height=raw.get("window_height", 1080),
-                origin_x=raw.get("window_origin_x"),
-                origin_y=raw.get("window_origin_y"),
+            window=_build(WindowConfig, raw.get("window", {}), "window"),
+            corridor=_build(CorridorConfig, raw.get("corridor", {}), "corridor"),
+            camera=_build(CameraConfig, raw.get("camera", {}), "camera"),
+            fog=_build(FogConfig, _parse_fog(raw.get("fog", {})), "fog"),
+            input=_build(InputConfig, _parse_input(raw.get("input", {})), "input"),
+            experiment=_build(
+                ExperimentConfig, _parse_experiment(raw["experiment"]), "experiment"
             ),
-            corridor=CorridorConfig(
-                segment_length=raw.get("segment_length", 10.0),
-                corridor_width=raw.get("corridor_width", 8.0),
-                wall_height=raw.get("wall_height", 10.0),
-                num_segments=raw.get("num_segments", 50),
-                left_wall_texture=raw.get("left_wall_texture", "assets/test3.png"),
-                right_wall_texture=raw.get("right_wall_texture", "assets/test3.png"),
-                ceiling_texture=raw.get("ceiling_texture", "assets/white.png"),
-                floor_texture=raw.get("floor_texture", "assets/black.png"),
-            ),
-            camera=CameraConfig(
-                height=raw.get("camera_height", 2.0),
-                speed_scaling=raw.get("speed_scaling", 0.05),
-                keyboard_speed=raw.get("keyboard_speed", 20.0),
-            ),
-            fog=FogConfig(
-                density=raw.get("fog_density", 0.06),
-                color=tuple(raw.get("fog_color", [0.5, 0.5, 0.5])),
-            ),
-            input=InputConfig(
-                mode=InputMode(raw.get("input_mode", "keyboard")),
-                serial_port=raw.get("serial_port", "/dev/ttyUSB0"),
-                baud_rate=raw.get("baud_rate", 57600),
-            ),
-            experiment=ExperimentConfig(),
-            triggers=TriggerConfig(),
-            logging=LoggingConfig(
-                subject=raw.get("subject", "000"),
-                session=raw.get("session", "00"),
-                task=raw.get("task", "portal"),
-                output_dir=raw.get("output_dir", "data"),
-            ),
+            triggers=_build(TriggerConfig, raw.get("triggers", {}), "triggers"),
+            logging=_build(LoggingConfig, raw["logging"], "logging"),
+            timing=_build(TimingConfig, raw.get("timing", {}), "timing"),
+            sync_patch=_build(SyncPatchConfig, raw.get("sync_patch", {}), "sync_patch"),
+            assets=_build(AssetsConfig, raw.get("assets", {}), "assets"),
         )
 
 
@@ -414,23 +623,74 @@ def _parse_input(d: Dict[str, Any]) -> Dict[str, Any]:
 
 def _parse_experiment(d: Dict[str, Any]) -> Dict[str, Any]:
     """Convert experiment JSON to ExperimentConfig kwargs."""
+    if not isinstance(d, dict):
+        raise ValueError(f"experiment must be a JSON object, got {type(d).__name__}")
     out = dict(d)
-    if "trial_end_condition" in out and isinstance(out["trial_end_condition"], str):
-        out["trial_end_condition"] = TrialEndCondition(out["trial_end_condition"])
-    if isinstance(out.get("iti_range"), list):
+    if "iti_range" in out and out["iti_range"] is not None:
         out["iti_range"] = tuple(out["iti_range"])
-    # Parse conditions list → TrialCondition instances
-    if "conditions" in out and isinstance(out["conditions"], list):
-        out["conditions"] = [
-            TrialCondition(**_parse_condition(c)) if isinstance(c, dict) else c
-            for c in out["conditions"]
-        ]
+    if "conditions" in out:
+        out["conditions"] = tuple(
+            _build(TrialCondition, _parse_condition(c), f"experiment.conditions[{i}]")
+            for i, c in enumerate(_as_list(out["conditions"], "experiment.conditions"))
+        )
+    if "blocks" in out:
+        out["blocks"] = tuple(
+            _build(BlockConfig, _parse_block(b, i), f"experiment.blocks[{i}]")
+            for i, b in enumerate(_as_list(out["blocks"], "experiment.blocks"))
+        )
     return out
 
 
 def _parse_condition(d: Dict[str, Any]) -> Dict[str, Any]:
     """Convert condition JSON to TrialCondition kwargs."""
+    if not isinstance(d, dict):
+        raise ValueError(f"each condition must be a JSON object, got {type(d).__name__}")
     out = dict(d)
-    if isinstance(out.get("iti_range"), list):
+    label = out.get("label", "?")
+    if "trial_end_condition" not in out:
+        raise ValueError(
+            f"condition '{label}' must state a trial_end_condition "
+            f"({[e.value for e in TrialEndCondition]})"
+        )
+    out["trial_end_condition"] = _enum(
+        TrialEndCondition, out["trial_end_condition"],
+        f"condition '{label}': trial_end_condition",
+    )
+    if "iti_range" in out and out["iti_range"] is not None:
         out["iti_range"] = tuple(out["iti_range"])
     return out
+
+
+def _parse_block(d: Dict[str, Any], index: int) -> Dict[str, Any]:
+    """Convert block JSON to BlockConfig kwargs."""
+    if not isinstance(d, dict):
+        raise ValueError(
+            f"experiment.blocks[{index}] must be a JSON object, got {type(d).__name__}"
+        )
+    out = dict(d)
+    if "sequence" in out:
+        out["sequence"] = tuple(
+            _as_list(out["sequence"], f"experiment.blocks[{index}].sequence")
+        )
+    if "order" in out:
+        out["order"] = _enum(
+            BlockOrder, out["order"], f"experiment.blocks[{index}].order"
+        )
+    return out
+
+
+def _as_list(value: Any, where: str) -> List[Any]:
+    """Require a JSON array, so a bare string does not silently iterate as chars."""
+    if not isinstance(value, list):
+        raise ValueError(f"{where} must be a JSON array, got {type(value).__name__}")
+    return value
+
+
+def _enum(cls, value: Any, where: str):
+    """Coerce a JSON string to *cls*, listing the valid values on failure."""
+    try:
+        return cls(value)
+    except ValueError:
+        raise ValueError(
+            f"{where} must be one of {[e.value for e in cls]}, got {value!r}"
+        ) from None

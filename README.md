@@ -151,16 +151,19 @@ Config is a nested JSON file (see [cfg.json](cfg.json)) with these sections:
 |---|---|
 | `window` | Size and multi-monitor origin |
 | `corridor` | Segment geometry, counts, wall/floor/ceiling textures |
-| `camera` | Height, `speed_scaling` (encoder), `keyboard_speed` |
+| `camera` | Height, `speed_scaling` (encoder → corridor units/s), `keyboard_speed` |
 | `fog` | Density and color |
 | `input` | `mode` (`keyboard`/`serial`/`network`), serial port/baud, UDP host/port |
-| `experiment` | Blocks, trials, ITI, end condition, `conditions` + `block_conditions` |
+| `experiment` | ITI, end condition, `conditions` + `blocks` |
+| `assets` | Optional extra directory on Panda3D's model search path |
 | `triggers` | Optional serial trigger output |
 | `logging` | `subject`/`session`/`task` (BIDS) or explicit `output_path` stem |
 | `timing` | `explicit_flip`, `sync_video`, `dropped_frame_threshold` |
 | `sync_patch` | Photodiode patch corner, size, and luminance levels |
 
-Each `condition` selects a velocity transform and optional per-condition trial-end overrides; `block_conditions` define the per-trial sequence of condition labels for each block.
+Each `condition` selects a velocity transform and optional per-condition trial-end overrides. `blocks` is the session structure and the only place it is declared: each block gives a `sequence` of condition labels, an optional `repeat` count, and an `order` of `fixed` or `shuffle`. The number of blocks is the length of that list and a block's trial count is `len(sequence) × repeat`, so blocks may differ in length. Config errors — an undefined label, an unknown transform, a misspelled key — are raised at load with the offender named; nothing falls back to a default trial.
+
+See [docs/glitch-experiment.md](docs/glitch-experiment.md) for the full reference.
 
 ## Layout
 

@@ -225,9 +225,11 @@ class InputManager:
     """
     Unified input facade.
 
-    Depending on ``InputConfig.mode``, either a serial or keyboard
-    backend is activated.  The rest of the application reads only
-    ``input_manager.velocity``.
+    Depending on ``InputConfig.mode``, a serial, network, or keyboard backend
+    is activated.  The rest of the application reads only
+    ``input_manager.velocity``, which is already in corridor units per second
+    — ``speed_scaling`` is applied here, at the one place every backend's
+    reading passes through.
     """
 
     def __init__(
@@ -239,6 +241,7 @@ class InputManager:
         keyboard_speed: float = 20.0,
     ) -> None:
         self._mode = cfg.mode
+        self._speed_scaling = speed_scaling
         self._serial: Optional[_SerialBackend] = None
         self._keyboard: Optional[_KeyboardBackend] = None
         self._network: Optional[_NetworkBackend] = None
@@ -257,14 +260,24 @@ class InputManager:
 
     @property
     def velocity(self) -> float:
-        """Current movement velocity from the active input source."""
+        """Current movement velocity from the active input source.
+
+        ``speed_scaling`` converts the encoder's units into corridor units per
+        second, so it applies to both hardware backends.  It does not apply to
+        the keyboard, whose ``keyboard_speed`` is already a corridor speed.
+
+        A mode with no live backend is a construction bug, not a runtime
+        condition, so it raises rather than reporting a stationary animal.
+        """
         if self._mode == InputMode.SERIAL and self._serial is not None:
-            return self._serial.data.speed
+            return self._serial.data.speed * self._speed_scaling
+        if self._mode == InputMode.NETWORK and self._network is not None:
+            return self._network.velocity * self._speed_scaling
         if self._mode == InputMode.KEYBOARD and self._keyboard is not None:
             return self._keyboard.velocity
-        if self._mode == InputMode.NETWORK and self._network is not None:
-            return self._network.velocity
-        return 0.0
+        raise RuntimeError(
+            f"InputManager has no active backend for mode {self._mode!r}"
+        )
 
     @property
     def last_sample(self) -> Optional[EncoderData]:

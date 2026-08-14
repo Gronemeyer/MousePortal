@@ -14,6 +14,13 @@ The state machine is advanced each frame via ``tick(dt, position)``.
 Transitions emit named events through an injected callable so the logger and
 trigger manager can react without tight coupling.
 
+Session structure comes entirely from ``ExperimentConfig.blocks``: the number
+of blocks is the length of that list and each block's trial count is the
+length of its own expanded sequence, so blocks may differ in length and no
+second declaration exists to contradict them.  The plan is expanded once at
+construction — ``shuffle`` blocks are drawn there — which is what lets the
+whole realised order be written to the timing sidecar before the first frame.
+
 Event tokens are the experiment's vocabulary, not the state machine's internal
 state names — ``TRIAL_START`` and ``TRIAL_END`` bracket a trial regardless of
 which state follows.  The set is open: ``STIMULUS_ONSET``, ``RESPONSE`` and
@@ -25,10 +32,27 @@ from __future__ import annotations
 import json
 import random
 from enum import Enum, auto
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
-from mouseportal.config import ExperimentConfig, TrialCondition, TrialEndCondition
+from mouseportal.config import (
+    BlockConfig, ExperimentConfig, TrialCondition, TrialEndCondition,
+    default_seed,
+)
 from mouseportal.transforms import VelocityTransform, IdentityTransform, build_transform
+
+
+# Placeholder condition for the frames before the first trial starts. It is
+# never looked up from the config and never runs a transform; it exists so
+# ``condition`` is always a TrialCondition. Its label is deliberately not a
+# plausible condition name — the previous default labelled every pre-session
+# frame "normal", which is indistinguishable in the CSV from a real one.
+_NO_CONDITION = TrialCondition(
+    label="none",
+    transform_type="identity",
+    # Nothing ends this placeholder; MANUAL is the rule that never fires on
+    # its own, which is the correct answer for "not in a trial".
+    trial_end_condition=TrialEndCondition.MANUAL,
+)
 
 
 class ExperimentState(Enum):
@@ -67,22 +91,33 @@ class ExperimentStateMachine:
         self._trial_distance_traveled: float = 0.0
         self._iti_elapsed: float = 0.0
 
-        # One RNG for the whole session. An unset seed is drawn here and exposed
-        # so the caller can record it; passing it back reproduces the session.
+        # One seed for the whole session, exposed so the caller can record it;
+        # passing it back reproduces the session exactly. An unset seed falls
+        # back to today's date as YYYYMMDD, which is legible in the sidecar and
+        # ties a session's random draws to the day it was run.
         self.seed: int = (
-            cfg.random_seed if cfg.random_seed is not None else random.randrange(2 ** 31)
+            cfg.random_seed if cfg.random_seed is not None else default_seed()
         )
-        self._rng = random.Random(self.seed)
+        # Two independent streams derived from that one seed. Sharing a single
+        # RNG would couple the two draws: adding a trial to a block would shift
+        # every subsequent ITI, so two sessions that differ only in block
+        # length would also differ in timing for no stated reason.
+        _master = random.Random(self.seed)
+        self._plan_rng = random.Random(_master.randrange(2 ** 31))
+        self._rng = random.Random(_master.randrange(2 ** 31))
+
+        # The realised trial order, resolved once here: shuffled blocks are
+        # drawn now rather than at each block boundary, so the whole session's
+        # plan can be recorded up front and replayed from the seed.
+        self._plan: List[List[str]] = cfg.expand(self._plan_rng)
+        self._conditions: Dict[str, TrialCondition] = cfg.condition_map()
+
         self._iti_target: float = cfg.iti_duration
 
-        # Active trial condition & velocity transform
-        self._condition: TrialCondition = TrialCondition()
+        # Active trial condition & velocity transform. The end rule and its
+        # limit come straight off the condition — there is nothing to resolve.
+        self._condition: TrialCondition = _NO_CONDITION
         self._transform: VelocityTransform = IdentityTransform()
-
-        # Resolved per-trial end parameters (condition override → global)
-        self._active_end_condition: TrialEndCondition = cfg.trial_end_condition
-        self._active_trial_distance: float = cfg.trial_distance
-        self._active_trial_duration: float = cfg.trial_duration
 
     # ─── Public API ─────────────────────────────────────────────────────────
 
@@ -144,6 +179,54 @@ class ExperimentStateMachine:
         return self._condition
 
     @property
+    def plan(self) -> List[List[str]]:
+        """The realised trial order for every block, in session order.
+
+        Resolved once at construction, so this is what the session *will* run
+        (or did run), not what the config asked for — the difference being any
+        ``shuffle`` block, whose order is drawn from the seed.
+        """
+        return [list(seq) for seq in self._plan]
+
+    @property
+    def num_blocks(self) -> int:
+        """Blocks in the session."""
+        return len(self._plan)
+
+    @property
+    def total_trials(self) -> int:
+        """Trials across the whole session."""
+        return sum(len(seq) for seq in self._plan)
+
+    def describe_plan(self) -> Dict[str, Any]:
+        """The session's realised design, for the timing sidecar.
+
+        A ``shuffle`` block's order exists nowhere in the config — only in the
+        seed — so recording the expanded sequence here is what makes a session
+        readable without re-running the expansion to find out what happened.
+        """
+        return {
+            "random_seed": self.seed,
+            "total_trials": self.total_trials,
+            "blocks": [
+                {"name": blk.name, "order": blk.order.value, "sequence": seq}
+                for blk, seq in zip(self.cfg.blocks, self._plan)
+            ],
+        }
+
+    @property
+    def block_config(self) -> BlockConfig:
+        """The running block's config. Valid once :meth:`start` has been called."""
+        return self.cfg.blocks[self.block - 1]
+
+    @property
+    def trials_in_block(self) -> int:
+        """Trials in the running block. 0 before the session starts."""
+        if not 1 <= self.block <= len(self._plan):
+            return 0
+        return len(self._plan[self.block - 1])
+
+    @property
     def trial_elapsed(self) -> float:
         """Seconds elapsed in the current trial."""
         return self._trial_elapsed
@@ -165,18 +248,18 @@ class ExperimentStateMachine:
 
     @property
     def active_end_condition(self) -> TrialEndCondition:
-        """The resolved end condition for the current trial."""
-        return self._active_end_condition
+        """The end rule for the current trial."""
+        return self._condition.trial_end_condition
 
     @property
     def active_trial_distance(self) -> float:
-        """The resolved target distance for the current trial."""
-        return self._active_trial_distance
+        """The target distance for the current trial. 0 unless the rule is DISTANCE."""
+        return self._condition.trial_distance or 0.0
 
     @property
     def active_trial_duration(self) -> float:
-        """The resolved target duration for the current trial."""
-        return self._active_trial_duration
+        """The target duration for the current trial. 0 unless the rule is DURATION."""
+        return self._condition.trial_duration or 0.0
 
     def apply_transform(self, velocity: float, dt: float, position: float) -> float:
         """Apply the active trial's velocity transform."""
@@ -194,21 +277,24 @@ class ExperimentStateMachine:
         })
 
     def _begin_next_block(self) -> None:
-        if self.block >= self.cfg.num_blocks:
+        if self.block >= len(self._plan):
             self.state = ExperimentState.SESSION_COMPLETE
             self._emit("SESSION_COMPLETE")
             return
         self.block += 1
         self.trial = 0
         self.state = ExperimentState.BLOCK_START
-        self._emit("BLOCK_START")
+        # The block's name rides on the event's value, so the events table
+        # identifies blocks by what they are and not only by their index.
+        self._emit("BLOCK_START", value=self.block_config.name or None)
         # Auto-advance to first trial immediately
         self._begin_next_trial()
 
     def _begin_next_trial(self) -> None:
-        if self.trial >= self.cfg.trials_per_block:
+        sequence = self._plan[self.block - 1]
+        if self.trial >= len(sequence):
             self.state = ExperimentState.BLOCK_END
-            self._emit("BLOCK_END")
+            self._emit("BLOCK_END", value=self.block_config.name or None)
             self._begin_next_block()
             return
         self.trial += 1
@@ -216,30 +302,15 @@ class ExperimentStateMachine:
         self._trial_distance_start = None  # latched on the trial's first tick
         self._trial_distance_traveled = 0.0
 
-        # Look up the condition for this trial and build its transform.
-        self._condition = self.cfg.condition_for(self.block, self.trial)
+        # Look up the condition for this trial and build its transform. Every
+        # label in the plan was checked against the palette at config load, so
+        # a miss here is a bug in the plan, not bad input — hence no fallback.
+        self._condition = self._conditions[sequence[self.trial - 1]]
         self._transform = build_transform(
             self._condition.transform_type,
             self._condition.transform_params or None,
         )
         self._transform.reset()
-
-        # Resolve per-trial end parameters (condition override → global).
-        if self._condition.trial_end_condition is not None:
-            self._active_end_condition = TrialEndCondition(self._condition.trial_end_condition)
-        else:
-            self._active_end_condition = self.cfg.trial_end_condition
-
-        self._active_trial_distance = (
-            self._condition.trial_distance
-            if self._condition.trial_distance is not None
-            else self.cfg.trial_distance
-        )
-        self._active_trial_duration = (
-            self._condition.trial_duration
-            if self._condition.trial_duration is not None
-            else self.cfg.trial_duration
-        )
 
         self.state = ExperimentState.TRIAL_RUNNING
         self._emit("TRIAL_START", condition=self._condition.label)
@@ -253,10 +324,10 @@ class ExperimentStateMachine:
             self._trial_distance_start = position
         self._trial_distance_traveled = abs(position - self._trial_distance_start)
 
-        if self._active_end_condition == TrialEndCondition.DURATION:
-            trial_over = self._trial_elapsed >= self._active_trial_duration
-        elif self._active_end_condition == TrialEndCondition.DISTANCE:
-            trial_over = self._trial_distance_traveled >= self._active_trial_distance
+        if self.active_end_condition == TrialEndCondition.DURATION:
+            trial_over = self._trial_elapsed >= self.active_trial_duration
+        elif self.active_end_condition == TrialEndCondition.DISTANCE:
+            trial_over = self._trial_distance_traveled >= self.active_trial_distance
         else:
             trial_over = False  # MANUAL: the caller must invoke end_trial()
 
@@ -290,7 +361,7 @@ class ExperimentStateMachine:
             return
         self._emit(
             "TRIAL_END",
-            value=self._active_end_condition.value,
+            value=self.active_end_condition.value,
             condition=self._condition.label,
         )
         self._iti_target = self._draw_iti()
@@ -307,8 +378,13 @@ class ExperimentStateMachine:
             self._begin_next_trial()
 
     def trial_summary(self) -> Dict[str, Any]:
-        """The just-ended trial's facts, for the trials table."""
-        return {
+        """The just-ended trial's facts, for the trials table.
+
+        ``block_name`` is omitted for an unnamed block rather than written as
+        an empty string, so the CSV writer's ``n/a`` applies and a missing name
+        reads the same as every other absent value in these tables.
+        """
+        summary: Dict[str, Any] = {
             "block": self.block,
             "trial": self.trial,
             "condition": self._condition.label,
@@ -316,5 +392,8 @@ class ExperimentStateMachine:
             "transform_params": json.dumps(self._condition.transform_params or {}),
             "duration": self._trial_elapsed,
             "distance": self._trial_distance_traveled,
-            "end_rule": self._active_end_condition.value,
+            "end_rule": self.active_end_condition.value,
         }
+        if self.block_config.name:
+            summary["block_name"] = self.block_config.name
+        return summary

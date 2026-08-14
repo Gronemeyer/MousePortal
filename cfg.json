@@ -15,7 +15,7 @@
     },
     "camera": {
         "height": 2.0,
-        "speed_scaling": 0.05,
+        "speed_scaling": 1.0,
         "keyboard_speed": 20.0
     },
     "fog": {
@@ -28,21 +28,16 @@
         "baud_rate": 57600
     },
     "experiment": {
-        "num_blocks": 20,
-        "trials_per_block": 4,
         "iti_duration": 2.0,
-        "trial_end_condition": "distance",
-        "trial_distance": 50.0,
-        "trial_duration": 60.0,
         "conditions": [
-            {"label": "normal", "transform_type": "identity"},
+            {"label": "normal", "transform_type": "identity", "trial_end_condition": "distance", "trial_distance": 50.0},
             {"label": "freeze", "transform_type": "freeze", "trial_end_condition": "duration", "trial_duration": 10.0},
-            {"label": "gain_2x", "transform_type": "gain", "transform_params": {"gain": 2.0}},
-            {"label": "invert", "transform_type": "invert"}
+            {"label": "gain_2x", "transform_type": "gain", "transform_params": {"gain": 2.0}, "trial_end_condition": "distance", "trial_distance": 50.0},
+            {"label": "invert", "transform_type": "invert", "trial_end_condition": "distance", "trial_distance": 50.0}
         ],
-        "block_conditions": [
-            {"condition_sequence": ["normal", "freeze", "normal", "gain_2x"]},
-            {"condition_sequence": ["invert", "normal", "freeze", "normal"]}
+        "blocks": [
+            {"name": "order_A", "sequence": ["normal", "freeze", "normal", "gain_2x"], "repeat": 5},
+            {"name": "order_B", "sequence": ["invert", "normal", "freeze", "normal"], "repeat": 5}
         ]
     },
     "triggers": {
